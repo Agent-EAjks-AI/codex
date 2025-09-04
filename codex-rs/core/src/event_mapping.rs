@@ -20,6 +20,9 @@ pub(crate) fn map_response_item_to_event_messages(
 ) -> Vec<EventMsg> {
     match item {
         ResponseItem::Message { role, content, .. } => {
+            if role == "system" {
+                return Vec::new();
+            }
             let mut events = Vec::new();
             for content_item in content {
                 match content_item {
