@@ -1,6 +1,5 @@
-use std::collections::HashMap;
+use std::time::Duration;
 
-use assert_cmd::cargo::cargo_bin;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
@@ -12,6 +11,7 @@ use core_test_support::responses::mount_sse_once;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use serde_json::Value;
 use wiremock::matchers::any;
 
@@ -38,36 +38,36 @@ async fn rmcp_tool_call_round_trip() -> anyhow::Result<()> {
         ]),
     )
     .await;
-    mount_sse_once(
-        &server,
-        any(),
-        responses::sse(vec![
-            responses::ev_assistant_message("msg-1", "rmcp echo tool completed successfully."),
-            responses::ev_completed("resp-2"),
-        ]),
-    )
-    .await;
+    // mount_sse_once(
+    //     &server,
+    //     any(),
+    //     responses::sse(vec![
+    //         responses::ev_assistant_message("msg-1", "rmcp echo tool completed successfully."),
+    //         responses::ev_completed("resp-2"),
+    //     ]),
+    // )
+    // .await;
 
     let expected_env_value = "propagated-env";
 
     let fixture = test_codex()
-        .with_config(move |config| {
-            use codex_core::config_types::McpServerConfig;
-            config.use_experimental_use_rmcp_client = true;
-            config.mcp_servers.insert(
-                server_name.to_string(),
-                McpServerConfig {
-                    command: cargo_bin("rmcp_test_server").to_string_lossy().into_owned(),
-                    args: Vec::new(),
-                    env: Some(HashMap::from([(
-                        "MCP_TEST_VALUE".to_string(),
-                        expected_env_value.to_string(),
-                    )])),
-                    startup_timeout_sec: None,
-                    tool_timeout_sec: None,
-                },
-            );
-        })
+        // .with_config(move |config| {
+        //     use codex_core::config_types::McpServerConfig;
+        //     config.use_experimental_use_rmcp_client = true;
+        //     config.mcp_servers.insert(
+        //         server_name.to_string(),
+        //         McpServerConfig {
+        //             command: cargo_bin("rmcp_test_server").to_string_lossy().into_owned(),
+        //             args: Vec::new(),
+        //             env: Some(HashMap::from([(
+        //                 "MCP_TEST_VALUE".to_string(),
+        //                 expected_env_value.to_string(),
+        //             )])),
+        //             startup_timeout_sec: Some(Duration::from_secs(10)),
+        //             tool_timeout_sec: None,
+        //         },
+        //     );
+        // })
         .build(&server)
         .await?;
     let session_model = fixture.session_configured.model.clone();
@@ -89,9 +89,14 @@ async fn rmcp_tool_call_round_trip() -> anyhow::Result<()> {
         .await?;
 
     eprintln!("waiting for begin event");
-    let begin_event = wait_for_event(&fixture.codex, |ev| {
-        matches!(ev, EventMsg::McpToolCallBegin(_))
-    })
+    let begin_event = wait_for_event_with_timeout(
+        &fixture.codex,
+        |ev| {
+            eprintln!("ev: {ev:?}");
+            matches!(ev, EventMsg::McpToolCallBegin(_))
+        },
+        Duration::from_secs(10),
+    )
     .await;
 
     eprintln!("begin_event: {begin_event:?}");
