@@ -52,7 +52,10 @@ async fn request_user_code(
     client_id: &str,
 ) -> std::io::Result<UserCodeResp> {
     let url = format!("{auth_base_url}/deviceauth/usercode");
-    let body = serde_json::to_string(&UserCodeReq { client_id }).map_err(std::io::Error::other)?;
+    let body = serde_json::to_string(&UserCodeReq {
+        client_id: client_id.to_string(),
+    })
+    .map_err(std::io::Error::other)?;
     let resp = client
         .post(url)
         .header("Content-Type", "application/json")
@@ -86,8 +89,8 @@ async fn poll_for_token(
 
     loop {
         let body = serde_json::to_string(&TokenPollReq {
-            client_id,
-            user_code,
+            client_id: client_id.to_string(),
+            user_code: user_code.to_string(),
         })
         .map_err(std::io::Error::other)?;
         let resp = client
@@ -170,7 +173,7 @@ pub async fn run_device_code_login(opts: ServerOptions) -> std::io::Result<()> {
         &opts.client_id,
         "",
         &empty_pkce,
-        &code_resp.code,
+        &code_resp.authorization_code,
     )
     .await
     .map_err(|err| std::io::Error::other(format!("device code exchange failed: {err}")))?;

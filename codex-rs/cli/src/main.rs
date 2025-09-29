@@ -294,8 +294,11 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 }
                 None => {
                     if login_cli.use_device_code {
-                        run_login_with_device_code(login_cli.config_overrides, login_cli.issuer)
-                            .await;
+                        run_login_with_device_code(
+                            login_cli.config_overrides,
+                            login_cli.issuer_base_url,
+                        )
+                        .await;
                     } else if let Some(api_key) = login_cli.api_key {
                         run_login_with_api_key(login_cli.config_overrides, api_key).await;
                     } else {
