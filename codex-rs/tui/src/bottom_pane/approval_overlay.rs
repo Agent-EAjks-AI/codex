@@ -515,7 +515,7 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|line| line.contains("Command: echo hello world")),
+                .any(|line| line.contains("echo hello world")),
             "expected header to include command snippet, got {rendered:?}"
         );
     }

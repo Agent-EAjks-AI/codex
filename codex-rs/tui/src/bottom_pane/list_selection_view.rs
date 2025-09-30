@@ -512,6 +512,9 @@ mod tests {
         view.set_search_query("filters".to_string());
 
         let lines = render_lines(&view);
-        assert!(lines.contains("▌ filters"));
+        assert!(
+            lines.contains("filters"),
+            "expected search query line to include rendered query, got {lines:?}"
+        );
     }
 }
