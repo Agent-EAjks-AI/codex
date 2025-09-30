@@ -1,16 +1,20 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneView;
 use crate::bottom_pane::CancellationEvent;
-use crate::bottom_pane::list_selection_view::HeaderLine;
 use crate::bottom_pane::list_selection_view::ListSelectionView;
 use crate::bottom_pane::list_selection_view::SelectionItem;
 use crate::bottom_pane::list_selection_view::SelectionViewParams;
+use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell;
+use crate::render::renderable::ColumnRenderable;
+use crate::render::renderable::Renderable;
 use crate::text_formatting::truncate_text;
+use codex_core::protocol::FileChange;
 use codex_core::protocol::Op;
 use codex_core::protocol::ReviewDecision;
 use crossterm::event::KeyCode;
@@ -22,6 +26,8 @@ use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Wrap;
 
 /// Request coming from the agent that needs user approval.
 pub(crate) enum ApprovalRequest {
@@ -33,13 +39,14 @@ pub(crate) enum ApprovalRequest {
     ApplyPatch {
         id: String,
         reason: Option<String>,
-        grant_root: Option<PathBuf>,
+        cwd: PathBuf,
+        changes: HashMap<PathBuf, FileChange>,
     },
 }
 
 /// Modal overlay asking the user to approve or deny one or more requests.
 pub(crate) struct ApprovalOverlay {
-    current: Option<ApprovalRequestState>,
+    current_variant: Option<ApprovalVariant>,
     queue: Vec<ApprovalRequest>,
     app_event_tx: AppEventSender,
     list: ListSelectionView,
@@ -51,23 +58,15 @@ pub(crate) struct ApprovalOverlay {
 impl ApprovalOverlay {
     pub fn new(request: ApprovalRequest, app_event_tx: AppEventSender) -> Self {
         let mut view = Self {
-            current: Some(ApprovalRequestState::from(request)),
+            current_variant: None,
             queue: Vec::new(),
             app_event_tx: app_event_tx.clone(),
-            list: ListSelectionView::new(
-                SelectionViewParams {
-                    title: String::new(),
-                    ..Default::default()
-                },
-                app_event_tx,
-            ),
+            list: ListSelectionView::new(Default::default(), app_event_tx),
             options: Vec::new(),
             current_complete: false,
             done: false,
         };
-        let (options, params) = view.build_options();
-        view.options = options;
-        view.list = ListSelectionView::new(params, view.app_event_tx.clone());
+        view.set_current(request);
         view
     }
 
@@ -76,27 +75,28 @@ impl ApprovalOverlay {
     }
 
     fn set_current(&mut self, request: ApprovalRequest) {
-        self.current = Some(ApprovalRequestState::from(request));
+        let ApprovalRequestState { variant, header } = ApprovalRequestState::from(request);
+        self.current_variant = Some(variant.clone());
         self.current_complete = false;
-        let (options, params) = self.build_options();
+        let (options, params) = Self::build_options(variant, header);
         self.options = options;
         self.list = ListSelectionView::new(params, self.app_event_tx.clone());
     }
 
-    fn build_options(&self) -> (Vec<ApprovalOption>, SelectionViewParams) {
-        let Some(state) = self.current.as_ref() else {
-            return (
-                Vec::new(),
-                SelectionViewParams {
-                    title: String::new(),
-                    ..Default::default()
-                },
-            );
-        };
-        let (options, title) = match &state.variant {
+    fn build_options(
+        variant: ApprovalVariant,
+        header: Box<dyn Renderable>,
+    ) -> (Vec<ApprovalOption>, SelectionViewParams) {
+        let (options, title) = match &variant {
             ApprovalVariant::Exec { .. } => (exec_options(), "Allow command?".to_string()),
             ApprovalVariant::ApplyPatch { .. } => (patch_options(), "Apply changes?".to_string()),
         };
+
+        let header = Box::new(ColumnRenderable::new([
+            Box::new(Line::from(title.bold())),
+            Box::new(Line::from("")),
+            header,
+        ]));
 
         let items = options
             .iter()
@@ -111,10 +111,9 @@ impl ApprovalOverlay {
             .collect();
 
         let params = SelectionViewParams {
-            title,
             footer_hint: Some("Press Enter to confirm or Esc to cancel".to_string()),
             items,
-            header: state.header.clone(),
+            header,
             ..Default::default()
         };
 
@@ -128,8 +127,8 @@ impl ApprovalOverlay {
         let Some(option) = self.options.get(actual_idx) else {
             return;
         };
-        if let Some(state) = self.current.as_ref() {
-            match (&state.variant, option.decision) {
+        if let Some(variant) = self.current_variant.as_ref() {
+            match (&variant, option.decision) {
                 (ApprovalVariant::Exec { id, command }, decision) => {
                     self.handle_exec_decision(id, command, decision);
                 }
@@ -215,9 +214,9 @@ impl BottomPaneView for ApprovalOverlay {
             return CancellationEvent::Handled;
         }
         if !self.current_complete
-            && let Some(state) = self.current.as_ref()
+            && let Some(variant) = self.current_variant.as_ref()
         {
-            match &state.variant {
+            match &variant {
                 ApprovalVariant::Exec { id, command } => {
                     self.handle_exec_decision(id, command, ReviewDecision::Abort);
                 }
@@ -258,7 +257,7 @@ impl BottomPaneView for ApprovalOverlay {
 
 struct ApprovalRequestState {
     variant: ApprovalVariant,
-    header: Vec<HeaderLine>,
+    header: Box<dyn Renderable>,
 }
 
 impl From<ApprovalRequest> for ApprovalRequestState {
@@ -269,63 +268,50 @@ impl From<ApprovalRequest> for ApprovalRequestState {
                 command,
                 reason,
             } => {
-                let mut header = Vec::new();
+                let mut header: Vec<Line<'static>> = Vec::new();
                 if let Some(reason) = reason
                     && !reason.is_empty()
                 {
-                    header.push(HeaderLine::Text {
-                        text: reason,
-                        italic: true,
-                    });
-                    header.push(HeaderLine::Spacer);
+                    header.push(reason.italic().into());
+                    header.push(Line::from(""));
                 }
                 let command_snippet = exec_snippet(&command);
                 if !command_snippet.is_empty() {
-                    header.push(HeaderLine::Text {
-                        text: format!("Command: {command_snippet}"),
-                        italic: false,
-                    });
-                    header.push(HeaderLine::Spacer);
+                    header.push(Line::from(format!("$ {command_snippet}")));
+                    header.push(Line::from(""));
                 }
                 Self {
                     variant: ApprovalVariant::Exec { id, command },
-                    header,
+                    header: Box::new(Paragraph::new(header).wrap(Wrap { trim: false })),
                 }
             }
             ApprovalRequest::ApplyPatch {
                 id,
                 reason,
-                grant_root,
+                cwd,
+                changes,
             } => {
-                let mut header = Vec::new();
+                let mut header: Vec<Box<dyn Renderable>> = Vec::new();
+                header.push(DiffSummary::new(changes, cwd).into());
+                header.push(Box::new(Line::from("")));
                 if let Some(reason) = reason
                     && !reason.is_empty()
                 {
-                    header.push(HeaderLine::Text {
-                        text: reason,
-                        italic: true,
-                    });
-                    header.push(HeaderLine::Spacer);
-                }
-                if let Some(root) = grant_root {
-                    header.push(HeaderLine::Text {
-                        text: format!(
-                            "Grant write access to {} for the remainder of this session.",
-                            root.display()
-                        ),
-                        italic: false,
-                    });
-                    header.push(HeaderLine::Spacer);
+                    header.push(Box::new(
+                        Paragraph::new(reason.italic()).wrap(Wrap { trim: false }),
+                    ));
+                    header.push(Box::new(Line::from("")));
                 }
                 Self {
                     variant: ApprovalVariant::ApplyPatch { id },
-                    header,
+                    header: Box::new(ColumnRenderable::new(header)),
                 }
             }
         }
     }
 }
 
+#[derive(Clone)]
 enum ApprovalVariant {
     Exec { id: String, command: Vec<String> },
     ApplyPatch { id: String },
@@ -343,20 +329,20 @@ fn exec_options() -> Vec<ApprovalOption> {
     vec![
         ApprovalOption {
             label: "Approve and run now".to_string(),
-            description: "(Y) Run this command one time".to_string(),
+            description: "Run this command one time".to_string(),
             decision: ReviewDecision::Approved,
             shortcut: Some('y'),
         },
         ApprovalOption {
             label: "Always approve this session".to_string(),
-            description: "(A) Automatically approve this command for the rest of the session"
+            description: "Automatically approve this command for the rest of the session"
                 .to_string(),
             decision: ReviewDecision::ApprovedForSession,
             shortcut: Some('a'),
         },
         ApprovalOption {
             label: "Cancel".to_string(),
-            description: "(N) Do not run the command".to_string(),
+            description: "Do not run the command".to_string(),
             decision: ReviewDecision::Abort,
             shortcut: Some('n'),
         },
@@ -367,13 +353,13 @@ fn patch_options() -> Vec<ApprovalOption> {
     vec![
         ApprovalOption {
             label: "Approve".to_string(),
-            description: "(Y) Apply the proposed changes".to_string(),
+            description: "Apply the proposed changes".to_string(),
             decision: ReviewDecision::Approved,
             shortcut: Some('y'),
         },
         ApprovalOption {
             label: "Cancel".to_string(),
-            description: "(N) Do not apply the changes".to_string(),
+            description: "Do not apply the changes".to_string(),
             decision: ReviewDecision::Abort,
             shortcut: Some('n'),
         },

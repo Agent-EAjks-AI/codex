@@ -324,12 +324,18 @@ impl App {
                     Ok(()) => {
                         if let Some(profile) = profile {
                             self.chat_widget.add_info_message(
-                                format!("Model changed to {model} for {profile} profile"),
+                                format!("Model changed to {model}{reasoning_effort} for {profile} profile", reasoning_effort = effort.map(|e| format!(" {e}")).unwrap_or_default()),
                                 None,
                             );
                         } else {
-                            self.chat_widget
-                                .add_info_message(format!("Model changed to {model}"), None);
+                            self.chat_widget.add_info_message(
+                                format!(
+                                    "Model changed to {model}{reasoning_effort}",
+                                    reasoning_effort =
+                                        effort.map(|e| format!(" {e}")).unwrap_or_default()
+                                ),
+                                None,
+                            );
                         }
                     }
                     Err(err) => {
