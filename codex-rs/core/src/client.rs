@@ -911,12 +911,47 @@ fn is_shell_tool_name(name: &str) -> bool {
     matches!(name, "shell" | "container.exec")
 }
 
+#[derive(Deserialize)]
+struct ExecOutputJson {
+    output: String,
+    metadata: ExecOutputMetadataJson,
+}
+
+#[derive(Deserialize)]
+struct ExecOutputMetadataJson {
+    exit_code: i32,
+    duration_seconds: f32,
+}
+
 fn parse_structured_shell_output(raw: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(raw).ok()?;
-    value
-        .get("structured_output")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
+    let parsed: ExecOutputJson = serde_json::from_str(raw).ok()?;
+    Some(build_structured_output(&parsed))
+}
+
+fn build_structured_output(parsed: &ExecOutputJson) -> String {
+    let mut sections = Vec::new();
+    sections.push(format!("Exit code: {}", parsed.metadata.exit_code));
+    sections.push(format!(
+        "Wall time: {} seconds",
+        parsed.metadata.duration_seconds
+    ));
+
+    if let Some(total_lines) = extract_total_output_lines(&parsed.output) {
+        sections.push(format!("Total output lines: {total_lines}"));
+    }
+
+    sections.push("Output:".to_string());
+    sections.push(parsed.output.clone());
+
+    sections.join("\n")
+}
+
+fn extract_total_output_lines(output: &str) -> Option<u32> {
+    let marker_start = output.find("[... omitted ")?;
+    let marker = &output[marker_start..];
+    let (_, after_of) = marker.split_once(" of ")?;
+    let (total_segment, _) = after_of.split_once(' ')?;
+    total_segment.parse::<u32>().ok()
 }
 
 /// used in tests to stream from a text SSE file
@@ -1394,7 +1429,6 @@ mod tests {
 
         let exec_payload = json!({
             "output": "raw output",
-            "structured_output": "Exit code: 0\nWall time: 1.235 seconds\nOutput:\nraw output",
             "metadata": {
                 "exit_code": 0,
                 "duration_seconds": 1.2
@@ -1442,10 +1476,9 @@ mod tests {
             panic!("unexpected event: {:?}", out[1]);
         };
         assert_eq!(call_id, "call-1");
-        assert!(
-            output.content.starts_with("Exit code: 0"),
-            "structured output was not rewritten: {}",
-            output.content
+        assert_eq!(
+            output.content,
+            "Exit code: 0\nWall time: 1.2 seconds\nOutput:\nraw output"
         );
     }
 

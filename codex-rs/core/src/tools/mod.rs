@@ -194,7 +194,6 @@ pub fn format_exec_output_apply_patch(exec_output: &ExecToolCallOutput) -> Strin
     #[derive(Serialize)]
     struct ExecOutput<'a> {
         output: &'a str,
-        structured_output: &'a str,
         metadata: ExecMetadata,
     }
 
@@ -202,11 +201,9 @@ pub fn format_exec_output_apply_patch(exec_output: &ExecToolCallOutput) -> Strin
     let duration_seconds = ((duration.as_secs_f32()) * 10.0).round() / 10.0;
 
     let formatted_output = format_exec_output_str(exec_output);
-    let structured_output = format_exec_output_structured(exec_output);
 
     let payload = ExecOutput {
         output: &formatted_output,
-        structured_output: &structured_output,
         metadata: ExecMetadata {
             exit_code: *exit_code,
             duration_seconds,
@@ -233,10 +230,12 @@ fn format_structured_error(message: &str) -> String {
     lines.join("\n")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn format_wall_time(duration: std::time::Duration) -> String {
     format_significant_digits(duration.as_secs_f64(), 4)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn format_significant_digits(value: f64, digits: usize) -> String {
     if !value.is_finite() {
         return value.to_string();
@@ -278,6 +277,7 @@ fn format_significant_digits(value: f64, digits: usize) -> String {
     s
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn format_exec_output_structured(exec_output: &ExecToolCallOutput) -> String {
     let ExecToolCallOutput {
         exit_code,
@@ -388,8 +388,6 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde::Deserialize;
     use std::time::Duration;
-    const TRUNCATED_STRUCTURED_EXPECTED: &str =
-        include_str!("tests/truncated_structured_expected.txt");
 
     fn sample_output() -> ExecToolCallOutput {
         ExecToolCallOutput {
@@ -445,7 +443,6 @@ mod tests {
         #[derive(Deserialize)]
         struct ExecOutput {
             output: String,
-            structured_output: String,
             metadata: ExecMetadata,
         }
 
@@ -455,10 +452,6 @@ mod tests {
             serde_json::from_str(&formatted).expect("exec output should be valid json");
 
         assert_eq!(payload.output, "stdout\nstderr");
-        assert_eq!(
-            payload.structured_output,
-            "Exit code: 0\nWall time: 1.235 seconds\nOutput:\nstdout\nstderr"
-        );
         assert_eq!(payload.metadata.exit_code, 0);
         assert_eq!(payload.metadata.duration_seconds, 1.2);
     }
@@ -467,7 +460,7 @@ mod tests {
     fn format_exec_output_truncates_long_output() {
         #[derive(Deserialize)]
         struct ExecOutput {
-            structured_output: String,
+            output: String,
         }
 
         let mut output = sample_output();
@@ -477,9 +470,10 @@ mod tests {
         }
         output.aggregated_output = StreamOutput::new(aggregated);
 
+        let expected = format_exec_output_str(&output);
         let formatted = format_exec_output_apply_patch(&output);
         let parsed: ExecOutput =
             serde_json::from_str(&formatted).expect("exec output should be valid json");
-        assert_eq!(parsed.structured_output, TRUNCATED_STRUCTURED_EXPECTED);
+        assert_eq!(parsed.output, expected);
     }
 }
