@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -33,6 +34,7 @@ use crate::client_common::ResponseStream;
 use crate::client_common::ResponsesApiRequest;
 use crate::client_common::create_reasoning_param_for_request;
 use crate::client_common::create_text_param_for_request;
+use crate::client_common::tools::ToolSpec;
 use crate::config::Config;
 use crate::default_client::create_client;
 use crate::error::CodexErr;
@@ -167,6 +169,13 @@ impl ModelClient {
 
     /// Implementation for the OpenAI *Responses* experimental API.
     async fn stream_responses(&self, prompt: &Prompt) -> Result<ResponseStream> {
+        let should_reserialize_shell_output = prompt.tools.iter().any(|tool| {
+            matches!(
+                tool,
+                ToolSpec::Freeform(freeform) if freeform.name == "apply_patch"
+            )
+        });
+
         if let Some(path) = &*CODEX_RS_SSE_FIXTURE {
             // short circuit for tests
             warn!(path, "Streaming from fixture");
@@ -174,6 +183,7 @@ impl ModelClient {
                 path,
                 self.provider.clone(),
                 self.otel_event_manager.clone(),
+                should_reserialize_shell_output,
             )
             .await;
         }
@@ -245,7 +255,12 @@ impl ModelClient {
         let max_attempts = self.provider.request_max_retries();
         for attempt in 0..=max_attempts {
             match self
-                .attempt_stream_responses(attempt, &payload_json, &auth_manager)
+                .attempt_stream_responses(
+                    attempt,
+                    &payload_json,
+                    &auth_manager,
+                    should_reserialize_shell_output,
+                )
                 .await
             {
                 Ok(stream) => {
@@ -273,6 +288,7 @@ impl ModelClient {
         attempt: u64,
         payload_json: &Value,
         auth_manager: &Option<Arc<AuthManager>>,
+        should_reserialize_shell_output: bool,
     ) -> std::result::Result<ResponseStream, StreamAttemptError> {
         // Always fetch the latest auth in case a prior attempt refreshed the token.
         let auth = auth_manager.as_ref().and_then(|m| m.auth());
@@ -343,6 +359,7 @@ impl ModelClient {
                     tx_event,
                     self.provider.stream_idle_timeout(),
                     self.otel_event_manager.clone(),
+                    should_reserialize_shell_output,
                 ));
 
                 Ok(ResponseStream { rx_event })
@@ -639,6 +656,7 @@ async fn process_sse<S>(
     tx_event: mpsc::Sender<Result<ResponseEvent>>,
     idle_timeout: Duration,
     otel_event_manager: OtelEventManager,
+    should_reserialize_shell_output: bool,
 ) where
     S: Stream<Item = Result<Bytes>> + Unpin,
 {
@@ -648,6 +666,7 @@ async fn process_sse<S>(
     // The response id returned from the "complete" message.
     let mut response_completed: Option<ResponseCompleted> = None;
     let mut response_error: Option<CodexErr> = None;
+    let mut shell_call_ids: HashSet<String> = HashSet::new();
 
     loop {
         let sse = match otel_event_manager
@@ -743,10 +762,14 @@ async fn process_sse<S>(
             // drop the duplicated list inside `response.completed`.
             "response.output_item.done" => {
                 let Some(item_val) = event.item else { continue };
-                let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) else {
+                let Ok(mut item) = serde_json::from_value::<ResponseItem>(item_val) else {
                     debug!("failed to parse ResponseItem from output_item.done");
                     continue;
                 };
+
+                if should_reserialize_shell_output {
+                    reserialize_shell_output_if_needed(&mut item, &mut shell_call_ids);
+                }
 
                 let event = ResponseEvent::OutputItemDone(item);
                 if tx_event.send(Ok(event)).await.is_err() {
@@ -860,11 +883,48 @@ async fn process_sse<S>(
     }
 }
 
+fn reserialize_shell_output_if_needed(
+    item: &mut ResponseItem,
+    shell_call_ids: &mut HashSet<String>,
+) {
+    match item {
+        ResponseItem::LocalShellCall { call_id, id, .. } => {
+            if let Some(identifier) = call_id.clone().or_else(|| id.clone()) {
+                shell_call_ids.insert(identifier);
+            }
+        }
+        ResponseItem::FunctionCall { name, call_id, .. } if is_shell_tool_name(name) => {
+            shell_call_ids.insert(call_id.clone());
+        }
+        ResponseItem::FunctionCallOutput { call_id, output } => {
+            if shell_call_ids.remove(call_id)
+                && let Some(structured) = parse_structured_shell_output(&output.content)
+            {
+                output.content = structured;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_shell_tool_name(name: &str) -> bool {
+    matches!(name, "shell" | "container.exec")
+}
+
+fn parse_structured_shell_output(raw: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("structured_output")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+}
+
 /// used in tests to stream from a text SSE file
 async fn stream_from_fixture(
     path: impl AsRef<Path>,
     provider: ModelProviderInfo,
     otel_event_manager: OtelEventManager,
+    should_reserialize_shell_output: bool,
 ) -> Result<ResponseStream> {
     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
     let f = std::fs::File::open(path.as_ref())?;
@@ -884,6 +944,7 @@ async fn stream_from_fixture(
         tx_event,
         provider.stream_idle_timeout(),
         otel_event_manager,
+        should_reserialize_shell_output,
     ));
     Ok(ResponseStream { rx_event })
 }
@@ -940,6 +1001,7 @@ mod tests {
         chunks: &[&[u8]],
         provider: ModelProviderInfo,
         otel_event_manager: OtelEventManager,
+        should_reserialize_shell_output: bool,
     ) -> Vec<Result<ResponseEvent>> {
         let mut builder = IoBuilder::new();
         for chunk in chunks {
@@ -954,6 +1016,7 @@ mod tests {
             tx,
             provider.stream_idle_timeout(),
             otel_event_manager,
+            should_reserialize_shell_output,
         ));
 
         let mut events = Vec::new();
@@ -969,6 +1032,7 @@ mod tests {
         events: Vec<serde_json::Value>,
         provider: ModelProviderInfo,
         otel_event_manager: OtelEventManager,
+        should_reserialize_shell_output: bool,
     ) -> Vec<ResponseEvent> {
         let mut body = String::new();
         for e in events {
@@ -990,6 +1054,7 @@ mod tests {
             tx,
             provider.stream_idle_timeout(),
             otel_event_manager,
+            should_reserialize_shell_output,
         ));
 
         let mut out = Vec::new();
@@ -1068,6 +1133,7 @@ mod tests {
             &[sse1.as_bytes(), sse2.as_bytes(), sse3.as_bytes()],
             provider,
             otel_event_manager,
+            false,
         )
         .await;
 
@@ -1127,7 +1193,7 @@ mod tests {
 
         let otel_event_manager = otel_event_manager();
 
-        let events = collect_events(&[sse1.as_bytes()], provider, otel_event_manager).await;
+        let events = collect_events(&[sse1.as_bytes()], provider, otel_event_manager, false).await;
 
         assert_eq!(events.len(), 2);
 
@@ -1163,7 +1229,7 @@ mod tests {
 
         let otel_event_manager = otel_event_manager();
 
-        let events = collect_events(&[sse1.as_bytes()], provider, otel_event_manager).await;
+        let events = collect_events(&[sse1.as_bytes()], provider, otel_event_manager, false).await;
 
         assert_eq!(events.len(), 1);
 
@@ -1270,7 +1336,7 @@ mod tests {
 
             let otel_event_manager = otel_event_manager();
 
-            let out = run_sse(evs, provider, otel_event_manager).await;
+            let out = run_sse(evs, provider, otel_event_manager, false).await;
             assert_eq!(out.len(), case.expected_len, "case {}", case.name);
             assert!(
                 (case.expect_first)(&out[0]),
@@ -1305,6 +1371,82 @@ mod tests {
         };
         let delay = try_parse_retry_after(&err);
         assert_eq!(delay, Some(Duration::from_secs_f64(1.898)));
+    }
+
+    #[tokio::test]
+    async fn reserializes_shell_output_for_freeform_apply_patch() {
+        let provider = ModelProviderInfo {
+            name: "test".to_string(),
+            base_url: Some("https://test.com".to_string()),
+            env_key: Some("TEST_API_KEY".to_string()),
+            env_key_instructions: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: Some(0),
+            stream_max_retries: Some(0),
+            stream_idle_timeout_ms: Some(1000),
+            requires_openai_auth: false,
+        };
+
+        let otel_event_manager = otel_event_manager();
+
+        let exec_payload = json!({
+            "output": "raw output",
+            "structured_output": "Exit code: 0\nWall time: 1.235 seconds\nOutput:\nraw output",
+            "metadata": {
+                "exit_code": 0,
+                "duration_seconds": 1.2
+            }
+        })
+        .to_string();
+
+        let events = vec![
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "local_shell_call",
+                    "call_id": "call-1",
+                    "status": "completed",
+                    "action": {
+                        "type": "exec",
+                        "command": ["echo", "hi"],
+                        "timeout_ms": null,
+                        "working_directory": null,
+                        "env": null,
+                        "user": null
+                    }
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": exec_payload
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": { "id": "resp1" }
+            }),
+        ];
+
+        let out = run_sse(events, provider, otel_event_manager, true).await;
+        assert_eq!(out.len(), 3);
+
+        let ResponseEvent::OutputItemDone(ResponseItem::FunctionCallOutput { call_id, output }) =
+            &out[1]
+        else {
+            panic!("unexpected event: {:?}", out[1]);
+        };
+        assert_eq!(call_id, "call-1");
+        assert!(
+            output.content.starts_with("Exit code: 0"),
+            "structured output was not rewritten: {}",
+            output.content
+        );
     }
 
     #[test]

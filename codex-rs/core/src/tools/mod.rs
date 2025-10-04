@@ -44,12 +44,6 @@ pub(crate) const TELEMETRY_PREVIEW_MAX_LINES: usize = 64; // lines
 pub(crate) const TELEMETRY_PREVIEW_TRUNCATION_NOTICE: &str =
     "[... telemetry preview truncated ...]";
 
-#[derive(Clone, Copy)]
-pub(crate) enum ExecResponseFormat {
-    LegacyJson,
-    StructuredText,
-}
-
 // TODO(jif) break this down
 pub(crate) struct HandleExecRequest<'a> {
     pub tool_name: &'a str,
@@ -59,7 +53,6 @@ pub(crate) struct HandleExecRequest<'a> {
     pub turn_diff_tracker: &'a mut TurnDiffTracker,
     pub sub_id: String,
     pub call_id: String,
-    pub response_format: ExecResponseFormat,
 }
 
 pub(crate) async fn handle_container_exec_with_params(
@@ -73,7 +66,6 @@ pub(crate) async fn handle_container_exec_with_params(
         turn_diff_tracker,
         sub_id,
         call_id,
-        response_format,
     } = request;
     let otel_event_manager = turn_context.client.get_otel_event_manager();
 
@@ -169,7 +161,7 @@ pub(crate) async fn handle_container_exec_with_params(
     match output_result {
         Ok(output) => {
             let ExecToolCallOutput { exit_code, .. } = &output;
-            let content = format_exec_output(&output, response_format);
+            let content = format_exec_output_apply_patch(&output);
             if *exit_code == 0 {
                 Ok(content)
             } else {
@@ -178,10 +170,10 @@ pub(crate) async fn handle_container_exec_with_params(
         }
         Err(ExecError::Function(err)) => Err(err),
         Err(ExecError::Codex(CodexErr::Sandbox(SandboxErr::Timeout { output }))) => Err(
-            FunctionCallError::RespondToModel(format_exec_output(&output, response_format)),
+            FunctionCallError::RespondToModel(format_exec_output_apply_patch(&output)),
         ),
         Err(ExecError::Codex(err)) => Err(FunctionCallError::RespondToModel(
-            format_unexpected_exec_error(err, response_format),
+            format_unexpected_exec_error(err),
         )),
     }
 }
@@ -202,6 +194,7 @@ pub fn format_exec_output_apply_patch(exec_output: &ExecToolCallOutput) -> Strin
     #[derive(Serialize)]
     struct ExecOutput<'a> {
         output: &'a str,
+        structured_output: &'a str,
         metadata: ExecMetadata,
     }
 
@@ -209,9 +202,11 @@ pub fn format_exec_output_apply_patch(exec_output: &ExecToolCallOutput) -> Strin
     let duration_seconds = ((duration.as_secs_f32()) * 10.0).round() / 10.0;
 
     let formatted_output = format_exec_output_str(exec_output);
+    let structured_output = format_exec_output_structured(exec_output);
 
     let payload = ExecOutput {
         output: &formatted_output,
+        structured_output: &structured_output,
         metadata: ExecMetadata {
             exit_code: *exit_code,
             duration_seconds,
@@ -222,23 +217,11 @@ pub fn format_exec_output_apply_patch(exec_output: &ExecToolCallOutput) -> Strin
     serde_json::to_string(&payload).expect("serialize ExecOutput")
 }
 
-fn format_exec_output(
-    exec_output: &ExecToolCallOutput,
-    response_format: ExecResponseFormat,
-) -> String {
-    match response_format {
-        ExecResponseFormat::LegacyJson => format_exec_output_apply_patch(exec_output),
-        ExecResponseFormat::StructuredText => format_exec_output_structured(exec_output),
-    }
+fn format_unexpected_exec_error(err: CodexErr) -> String {
+    format!("execution error: {err:?}")
 }
 
-fn format_unexpected_exec_error(err: CodexErr, response_format: ExecResponseFormat) -> String {
-    match response_format {
-        ExecResponseFormat::LegacyJson => format!("execution error: {err:?}"),
-        ExecResponseFormat::StructuredText => format_structured_error(&format!("{err:?}")),
-    }
-}
-
+#[cfg(test)]
 fn format_structured_error(message: &str) -> String {
     let lines = [
         "Exit code: N/A".to_string(),
@@ -403,6 +386,7 @@ mod tests {
     use super::*;
     use crate::exec::StreamOutput;
     use pretty_assertions::assert_eq;
+    use serde::Deserialize;
     use std::time::Duration;
     const TRUNCATED_STRUCTURED_EXPECTED: &str =
         include_str!("tests/truncated_structured_expected.txt");
@@ -451,27 +435,41 @@ mod tests {
     }
 
     #[test]
-    fn format_exec_output_uses_legacy_json_formatter() {
-        let output = sample_output();
-        let formatted = format_exec_output(&output, ExecResponseFormat::LegacyJson);
-        assert_eq!(
-            formatted,
-            "{\"output\":\"stdout\\nstderr\",\"metadata\":{\"exit_code\":0,\"duration_seconds\":1.2}}"
-        );
-    }
+    fn format_exec_output_apply_patch_produces_expected_payload() {
+        #[derive(Deserialize)]
+        struct ExecMetadata {
+            exit_code: i32,
+            duration_seconds: f32,
+        }
 
-    #[test]
-    fn format_exec_output_uses_structured_formatter() {
+        #[derive(Deserialize)]
+        struct ExecOutput {
+            output: String,
+            structured_output: String,
+            metadata: ExecMetadata,
+        }
+
         let output = sample_output();
-        let formatted = format_exec_output(&output, ExecResponseFormat::StructuredText);
+        let formatted = format_exec_output_apply_patch(&output);
+        let payload: ExecOutput =
+            serde_json::from_str(&formatted).expect("exec output should be valid json");
+
+        assert_eq!(payload.output, "stdout\nstderr");
         assert_eq!(
-            formatted,
+            payload.structured_output,
             "Exit code: 0\nWall time: 1.235 seconds\nOutput:\nstdout\nstderr"
         );
+        assert_eq!(payload.metadata.exit_code, 0);
+        assert_eq!(payload.metadata.duration_seconds, 1.2);
     }
 
     #[test]
     fn format_exec_output_truncates_long_output() {
+        #[derive(Deserialize)]
+        struct ExecOutput {
+            structured_output: String,
+        }
+
         let mut output = sample_output();
         let mut aggregated = String::new();
         for i in 0..260 {
@@ -479,7 +477,9 @@ mod tests {
         }
         output.aggregated_output = StreamOutput::new(aggregated);
 
-        let formatted = format_exec_output(&output, ExecResponseFormat::StructuredText);
-        assert_eq!(formatted, TRUNCATED_STRUCTURED_EXPECTED);
+        let formatted = format_exec_output_apply_patch(&output);
+        let parsed: ExecOutput =
+            serde_json::from_str(&formatted).expect("exec output should be valid json");
+        assert_eq!(parsed.structured_output, TRUNCATED_STRUCTURED_EXPECTED);
     }
 }

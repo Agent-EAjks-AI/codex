@@ -8,7 +8,6 @@ use crate::client_common::tools::ToolSpec;
 use crate::exec::ExecParams;
 use crate::function_tool::FunctionCallError;
 use crate::openai_tools::JsonSchema;
-use crate::tools::ExecResponseFormat;
 use crate::tools::HandleExecRequest;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -52,16 +51,16 @@ impl ToolHandler for ApplyPatchHandler {
             payload,
         } = invocation;
 
-        let (patch_input, response_format) = match payload {
+        let patch_input = match payload {
             ToolPayload::Function { arguments } => {
                 let args: ApplyPatchToolArgs = serde_json::from_str(&arguments).map_err(|e| {
                     FunctionCallError::RespondToModel(format!(
                         "failed to parse function arguments: {e:?}"
                     ))
                 })?;
-                (args.input, ExecResponseFormat::LegacyJson)
+                args.input
             }
-            ToolPayload::Custom { input } => (input, ExecResponseFormat::StructuredText),
+            ToolPayload::Custom { input } => input,
             _ => {
                 return Err(FunctionCallError::RespondToModel(
                     "apply_patch handler received unsupported payload".to_string(),
@@ -86,7 +85,6 @@ impl ToolHandler for ApplyPatchHandler {
             turn_diff_tracker: tracker,
             sub_id: sub_id.to_string(),
             call_id: call_id.clone(),
-            response_format,
         })
         .await?;
 
