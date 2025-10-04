@@ -44,29 +44,15 @@ pub(crate) const TELEMETRY_PREVIEW_MAX_LINES: usize = 64; // lines
 pub(crate) const TELEMETRY_PREVIEW_TRUNCATION_NOTICE: &str =
     "[... telemetry preview truncated ...]";
 
-// TODO(jif) break this down
-pub(crate) struct HandleExecRequest<'a> {
-    pub tool_name: &'a str,
-    pub params: ExecParams,
-    pub sess: &'a Session,
-    pub turn_context: &'a TurnContext,
-    pub turn_diff_tracker: &'a mut TurnDiffTracker,
-    pub sub_id: String,
-    pub call_id: String,
-}
-
 pub(crate) async fn handle_container_exec_with_params(
-    request: HandleExecRequest<'_>,
+    tool_name: &str,
+    params: ExecParams,
+    sess: &Session,
+    turn_context: &TurnContext,
+    turn_diff_tracker: &mut TurnDiffTracker,
+    sub_id: String,
+    call_id: String,
 ) -> Result<String, FunctionCallError> {
-    let HandleExecRequest {
-        tool_name,
-        params,
-        sess,
-        turn_context,
-        turn_diff_tracker,
-        sub_id,
-        call_id,
-    } = request;
     let otel_event_manager = turn_context.client.get_otel_event_manager();
 
     if params.with_escalated_permissions.unwrap_or(false)
