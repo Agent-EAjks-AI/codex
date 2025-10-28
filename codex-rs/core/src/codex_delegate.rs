@@ -19,15 +19,33 @@ use crate::config::Config;
 use crate::error::CodexErr;
 use codex_protocol::protocol::InitialHistory;
 
-pub(crate) async fn run_codex_conversation(
+/// Channels for interacting with a sub-Codex conversation.
+///
+/// - `events_rx` streams non-approval `EventMsg`s from the sub-agent.
+///   Approval requests are handled internally via the parent session and are not surfaced here.
+/// - `ops_tx` allows callers to submit `Op`s to the sub-agent (e.g., `Op::UserInput`,
+///   `Op::ExecApproval`, `Op::PatchApproval`).
+#[derive(Clone)]
+pub(crate) struct ConversationIo {
+    pub events_rx: Receiver<EventMsg>,
+    pub ops_tx: Sender<Op>,
+}
+
+/// Start an interactive sub-Codex conversation and return IO channels.
+///
+/// The returned `events_rx` yields non-approval events emitted by the sub-agent.
+/// Approval requests are handled via `parent_session` and are not surfaced.
+/// The returned `ops_tx` allows the caller to submit additional `Op`s to the sub-agent.
+pub(crate) async fn run_codex_conversation_interactive(
     config: Config,
     auth_manager: Arc<AuthManager>,
-    input: Vec<UserInput>,
     parent_session: Arc<Session>,
     parent_ctx: Arc<TurnContext>,
     cancel_token: CancellationToken,
-) -> Result<Receiver<EventMsg>, CodexErr> {
+) -> Result<ConversationIo, CodexErr> {
     let (tx_sub, rx_sub) = async_channel::unbounded();
+    let (tx_ops, rx_ops) = async_channel::unbounded();
+
     let CodexSpawnOk { codex, .. } = Codex::spawn(
         config,
         auth_manager,
@@ -35,24 +53,74 @@ pub(crate) async fn run_codex_conversation(
         SessionSource::SubAgent,
     )
     .await?;
-
-    codex.submit(Op::UserInput { items: input }).await?;
+    let codex = Arc::new(codex);
 
     // Use a child token so parent cancel cascades but we can scope it to this task
-    let cancel_token = cancel_token.child_token();
+    let cancel_token_events = cancel_token.child_token();
+    let cancel_token_ops = cancel_token.child_token();
+
+    // Forward events from the sub-agent to the consumer, filtering approvals and
+    // routing them to the parent session for decisions.
     let parent_session_clone = Arc::clone(&parent_session);
     let parent_ctx_clone = Arc::clone(&parent_ctx);
+    let codex_for_events = Arc::clone(&codex);
     tokio::spawn(async move {
-        let _ = forward_events(codex, tx_sub, parent_session_clone, parent_ctx_clone)
-            .or_cancel(&cancel_token)
-            .await;
+        let _ = forward_events(
+            codex_for_events,
+            tx_sub,
+            parent_session_clone,
+            parent_ctx_clone,
+        )
+        .or_cancel(&cancel_token_events)
+        .await;
     });
 
-    Ok(rx_sub)
+    // Forward ops from the caller to the sub-agent.
+    let codex_for_ops = Arc::clone(&codex);
+    tokio::spawn(async move {
+        while let Ok(op) = rx_ops.recv().await {
+            let _ = codex_for_ops.submit(op).await;
+        }
+        // Ensure task can be cancelled via token as well.
+        let _ = cancel_token_ops.cancelled().await;
+    });
+
+    Ok(ConversationIo {
+        events_rx: rx_sub,
+        ops_tx: tx_ops,
+    })
+}
+
+/// Convenience wrapper for one-time use with an initial prompt.
+///
+/// Internally calls the interactive variant, then immediately submits the provided input.
+pub(crate) async fn run_codex_conversation_one_shot(
+    config: Config,
+    auth_manager: Arc<AuthManager>,
+    input: Vec<UserInput>,
+    parent_session: Arc<Session>,
+    parent_ctx: Arc<TurnContext>,
+    cancel_token: CancellationToken,
+) -> Result<ConversationIo, CodexErr> {
+    let io = run_codex_conversation_interactive(
+        config,
+        auth_manager,
+        parent_session,
+        parent_ctx,
+        cancel_token,
+    )
+    .await?;
+
+    io.ops_tx
+        .send(Op::UserInput { items: input })
+        .await
+        .map_err(|err| CodexErr::Fatal(format!("failed to send initial input op: {err}")))?;
+
+    Ok(io)
 }
 
 async fn forward_events(
-    codex: Codex,
+    codex: Arc<Codex>,
     tx_sub: Sender<EventMsg>,
     parent_session: Arc<Session>,
     parent_ctx: Arc<TurnContext>,
