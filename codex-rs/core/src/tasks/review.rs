@@ -104,7 +104,7 @@ async fn process_review_events(
                 let out = task_complete
                     .last_agent_message
                     .as_deref()
-                    .map(ReviewOutputEvent::from);
+                    .map(parse_review_output_event);
                 return out;
             }
             EventMsg::TurnAborted(_) => {
@@ -121,6 +121,28 @@ async fn process_review_events(
     }
     // Channel closed without TaskComplete: treat as interrupted.
     None
+}
+
+/// Parse a ReviewOutputEvent from a text blob returned by the reviewer model.
+/// If the text is valid JSON matching ReviewOutputEvent, deserialize it.
+/// Otherwise, attempt to extract the first JSON object substring and parse it.
+/// If parsing still fails, return a structured fallback carrying the plain text
+/// in `overall_explanation`.
+fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
+    if let Ok(ev) = serde_json::from_str::<ReviewOutputEvent>(text) {
+        return ev;
+    }
+    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}'))
+        && start < end
+        && let Some(slice) = text.get(start..=end)
+        && let Ok(ev) = serde_json::from_str::<ReviewOutputEvent>(slice)
+    {
+        return ev;
+    }
+    ReviewOutputEvent {
+        overall_explanation: text.to_string(),
+        ..Default::default()
+    }
 }
 
 /// Emits an ExitedReviewMode Event with optional ReviewOutput,

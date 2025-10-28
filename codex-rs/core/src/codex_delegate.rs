@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::AuthManager;
 use crate::codex::Codex;
 use crate::codex::CodexSpawnOk;
+use crate::codex::SUBMISSION_CHANNEL_CAPACITY;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::config::Config;
@@ -43,8 +44,8 @@ pub(crate) async fn run_codex_conversation_interactive(
     parent_ctx: Arc<TurnContext>,
     cancel_token: CancellationToken,
 ) -> Result<ConversationIo, CodexErr> {
-    let (tx_sub, rx_sub) = async_channel::unbounded();
-    let (tx_ops, rx_ops) = async_channel::unbounded();
+    let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
+    let (tx_ops, rx_ops) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
 
     let CodexSpawnOk { codex, .. } = Codex::spawn(
         config,
@@ -78,11 +79,13 @@ pub(crate) async fn run_codex_conversation_interactive(
     // Forward ops from the caller to the sub-agent.
     let codex_for_ops = Arc::clone(&codex);
     tokio::spawn(async move {
-        while let Ok(op) = rx_ops.recv().await {
+        loop {
+            let op = match rx_ops.recv().or_cancel(&cancel_token_ops).await {
+                Ok(Ok(op)) => op,
+                Ok(Err(_)) | Err(_) => break,
+            };
             let _ = codex_for_ops.submit(op).await;
         }
-        // Ensure task can be cancelled via token as well.
-        let _ = cancel_token_ops.cancelled().await;
     });
 
     Ok(ConversationIo {

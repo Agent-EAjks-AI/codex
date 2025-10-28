@@ -1043,27 +1043,6 @@ impl Default for ReviewOutputEvent {
     }
 }
 
-impl From<&str> for ReviewOutputEvent {
-    /// Parse a ReviewOutputEvent from text; when not valid JSON, build a structured
-    /// fallback that carries the plain text as the overall explanation.
-    fn from(text: &str) -> Self {
-        if let Ok(ev) = serde_json::from_str::<ReviewOutputEvent>(text) {
-            return ev;
-        }
-        if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}'))
-            && start < end
-            && let Some(slice) = text.get(start..=end)
-            && let Ok(ev) = serde_json::from_str::<ReviewOutputEvent>(slice)
-        {
-            return ev;
-        }
-        ReviewOutputEvent {
-            overall_explanation: text.to_string(),
-            ..Default::default()
-        }
-    }
-}
-
 /// A single review finding describing an observed issue or recommendation.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct ReviewFinding {
