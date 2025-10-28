@@ -103,7 +103,7 @@ async fn process_review_events(
                 let out = task_complete
                     .last_agent_message
                     .as_deref()
-                    .map(parse_review_output_event);
+                    .map(ReviewOutputEvent::from);
                 return out;
             }
             EventMsg::TurnAborted(_) => {
@@ -157,29 +157,4 @@ pub(crate) async fn exit_review_mode(
             EventMsg::ExitedReviewMode(ExitedReviewModeEvent { review_output }),
         )
         .await;
-}
-
-/// Parse the review output; when not valid JSON, build a structured
-/// fallback that carries the plain text as the overall explanation.
-///
-/// Returns: a ReviewOutputEvent parsed from JSON or a fallback populated from text.
-fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
-    // Try direct parse first
-    if let Ok(ev) = serde_json::from_str::<ReviewOutputEvent>(text) {
-        return ev;
-    }
-    // If wrapped in markdown fences or extra prose, attempt to extract the first JSON object
-    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}'))
-        && start < end
-        && let Some(slice) = text.get(start..=end)
-        && let Ok(ev) = serde_json::from_str::<ReviewOutputEvent>(slice)
-    {
-        return ev;
-    }
-    // Not JSON – return a structured ReviewOutputEvent that carries
-    // the plain text as the overall explanation.
-    ReviewOutputEvent {
-        overall_explanation: text.to_string(),
-        ..Default::default()
-    }
 }
