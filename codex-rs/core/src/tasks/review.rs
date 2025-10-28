@@ -47,7 +47,9 @@ impl SessionTask for ReviewTask {
             Some(receiver) => process_review_events(session.clone(), ctx.clone(), receiver).await,
             None => None,
         };
-        exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
+        if !cancellation_token.is_cancelled() {
+            exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
+        }
         None
     }
 
@@ -64,8 +66,11 @@ async fn start_review_conversation(
 ) -> Option<async_channel::Receiver<EventMsg>> {
     let config = ctx.client.get_config().await;
     let mut sub_agent_config = config.as_ref().clone();
+    // Run with only reviewer rubric — drop outer user_instructions
     sub_agent_config.user_instructions = None;
+    // Avoid loading project docs; reviewer only needs findings
     sub_agent_config.project_doc_max_bytes = 0;
+    // Set explicit review rubric for the sub-agent
     sub_agent_config.base_instructions = Some(crate::REVIEW_PROMPT.to_string());
     (run_codex_conversation(
         sub_agent_config,
@@ -124,8 +129,7 @@ pub(crate) async fn exit_review_mode(
     review_output: Option<ReviewOutputEvent>,
     ctx: Arc<TurnContext>,
 ) {
-    let mut user_message = String::new();
-    if let Some(out) = review_output.clone() {
+    let user_message = if let Some(out) = review_output.clone() {
         let mut findings_str = String::new();
         let text = out.overall_explanation.trim();
         if !text.is_empty() {
@@ -135,25 +139,10 @@ pub(crate) async fn exit_review_mode(
             let block = format_review_findings_block(&out.findings, None);
             findings_str.push_str(&format!("\n{block}"));
         }
-        user_message.push_str(&format!(
-            r#"<user_action>
-  <context>User initiated a review task. Here's the full review output from reviewer model. User may select one or more comments to resolve.</context>
-  <action>review</action>
-  <results>
-  {findings_str}
-  </results>
-</user_action>
-"#));
+        crate::client_common::REVIEW_EXIT_SUCCESS_TMPL.replace("{results}", &findings_str)
     } else {
-        user_message.push_str(r#"<user_action>
-  <context>User initiated a review task, but was interrupted. If user asks about this, tell them to re-initiate a review with `/review` and wait for it to complete.</context>
-  <action>review</action>
-  <results>
-  None.
-  </results>
-</user_action>
-"#);
-    }
+        crate::client_common::REVIEW_EXIT_INTERRUPTED_TMPL.to_string()
+    };
 
     session
         .record_conversation_items(&[ResponseItem::Message {

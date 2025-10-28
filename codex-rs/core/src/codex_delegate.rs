@@ -38,7 +38,8 @@ pub(crate) async fn run_codex_conversation(
 
     codex.submit(Op::UserInput { items: input }).await?;
 
-    let cancel_token = cancel_token.clone();
+    // Use a child token so parent cancel cascades but we can scope it to this task
+    let cancel_token = cancel_token.child_token();
     let parent_session_clone = Arc::clone(&parent_session);
     let parent_ctx_clone = Arc::clone(&parent_ctx);
     tokio::spawn(async move {
