@@ -23,6 +23,8 @@ use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::CancelLoginChatGptResponse;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
+use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::ConversationGitInfo;
 use codex_app_server_protocol::ConversationSummary;
 use codex_app_server_protocol::ExecCommandApprovalParams;
@@ -127,6 +129,8 @@ use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecApprovalRequestEvent;
+use codex_core::protocol::ExecCommandBeginEvent;
+use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::ReviewDecision;
 use codex_core::read_head_for_summary;
@@ -145,6 +149,7 @@ use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::USER_MESSAGE_BEGIN;
 use codex_protocol::user_input::UserInput as CoreInputItem;
 use codex_utils_json_to_toml::json_to_toml;
+use shlex;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Error as IoError;
@@ -187,6 +192,8 @@ pub(crate) struct CodexMessageProcessor {
     config: Arc<Config>,
     conversation_listeners: HashMap<Uuid, oneshot::Sender<()>>,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
+    // Track in-flight exec commands so we can populate ThreadItem::CommandExecution on completion.
+    running_exec_commands: Arc<Mutex<HashMap<ConversationId, HashMap<String, String>>>>,
     // Queue of pending interrupt requests per conversation. We reply when TurnAborted arrives.
     pending_interrupts: PendingInterrupts,
     pending_fuzzy_searches: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -240,6 +247,7 @@ impl CodexMessageProcessor {
             config,
             conversation_listeners: HashMap::new(),
             active_login: Arc::new(Mutex::new(None)),
+            running_exec_commands: Arc::new(Mutex::new(HashMap::new())),
             pending_interrupts: Arc::new(Mutex::new(HashMap::new())),
             pending_fuzzy_searches: Arc::new(Mutex::new(HashMap::new())),
             feedback,
@@ -2347,6 +2355,7 @@ impl CodexMessageProcessor {
 
         let outgoing_for_task = self.outgoing.clone();
         let pending_interrupts = self.pending_interrupts.clone();
+        let running_exec_commands = self.running_exec_commands.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -2401,6 +2410,7 @@ impl CodexMessageProcessor {
                             conversation_id,
                             conversation.clone(),
                             outgoing_for_task.clone(),
+                            running_exec_commands.clone(),
                             pending_interrupts.clone(),
                         )
                         .await;
@@ -2549,6 +2559,7 @@ async fn apply_bespoke_event_handling(
     conversation_id: ConversationId,
     conversation: Arc<CodexConversation>,
     outgoing: Arc<OutgoingMessageSender>,
+    running_exec_commands: Arc<Mutex<HashMap<ConversationId, HashMap<String, String>>>>,
     pending_interrupts: PendingInterrupts,
 ) {
     let Event { id: event_id, msg } = event;
@@ -2600,6 +2611,56 @@ async fn apply_bespoke_event_handling(
                 on_exec_approval_response(event_id, rx, conversation).await;
             });
         }
+        EventMsg::ExecCommandBegin(event) => {
+            let command = format_exec_command(&event.command);
+
+            {
+                let mut running = running_exec_commands.lock().await;
+                running
+                    .entry(conversation_id)
+                    .or_default()
+                    .insert(event.call_id.clone(), command.clone());
+            }
+
+            let item = thread_item_from_exec_begin(&event, command);
+            let notification = ItemStartedNotification { item };
+            outgoing
+                .send_server_notification(ServerNotification::ItemStarted(notification))
+                .await;
+        }
+        EventMsg::ExecCommandOutputDelta(delta) => {
+            let notification = CommandExecutionOutputDeltaNotification {
+                item_id: delta.call_id.clone(),
+                delta: String::from_utf8_lossy(&delta.chunk).to_string(),
+            };
+            outgoing
+                .send_server_notification(ServerNotification::CommandExecutionOutputDelta(
+                    notification,
+                ))
+                .await;
+        }
+        EventMsg::ExecCommandEnd(event) => {
+            let call_id = event.call_id.clone();
+            let command = {
+                let mut running = running_exec_commands.lock().await;
+                let command = running
+                    .get_mut(&conversation_id)
+                    .and_then(|map| map.remove(&call_id));
+                if let Some(map) = running.get(&conversation_id) {
+                    if map.is_empty() {
+                        running.remove(&conversation_id);
+                    }
+                }
+
+                command.unwrap_or_else(|| call_id.clone())
+            };
+
+            let item = thread_item_from_exec_end(&event, call_id, command);
+            let notification = ItemCompletedNotification { item };
+            outgoing
+                .send_server_notification(ServerNotification::ItemCompleted(notification))
+                .await;
+        }
         EventMsg::TokenCount(token_count_event) => {
             if let Some(rate_limits) = token_count_event.rate_limits {
                 outgoing
@@ -2650,6 +2711,48 @@ async fn apply_bespoke_event_handling(
         }
 
         _ => {}
+    }
+}
+
+fn format_exec_command(command: &[String]) -> String {
+    shlex::try_join(command.iter().map(String::as_str)).unwrap_or_else(|_| command.join(" "))
+}
+
+fn command_execution_status(exit_code: i32) -> CommandExecutionStatus {
+    if exit_code == 0 {
+        CommandExecutionStatus::Completed
+    } else {
+        CommandExecutionStatus::Failed
+    }
+}
+
+fn duration_ms(duration: Duration) -> Option<i64> {
+    i64::try_from(duration.as_millis()).ok()
+}
+
+fn thread_item_from_exec_begin(event: &ExecCommandBeginEvent, command: String) -> ThreadItem {
+    ThreadItem::CommandExecution {
+        id: event.call_id.clone(),
+        command,
+        aggregated_output: String::new(),
+        exit_code: None,
+        status: CommandExecutionStatus::InProgress,
+        duration_ms: None,
+    }
+}
+
+fn thread_item_from_exec_end(
+    event: &ExecCommandEndEvent,
+    call_id: String,
+    command: String,
+) -> ThreadItem {
+    ThreadItem::CommandExecution {
+        id: call_id,
+        command,
+        aggregated_output: event.aggregated_output.clone(),
+        exit_code: Some(event.exit_code),
+        status: command_execution_status(event.exit_code),
+        duration_ms: duration_ms(event.duration),
     }
 }
 
@@ -2890,6 +2993,7 @@ mod tests {
     use codex_protocol::protocol::SessionSource;
     use pretty_assertions::assert_eq;
     use serde_json::json;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     #[test]
@@ -2946,6 +3050,58 @@ mod tests {
 
         assert_eq!(summary, expected);
         Ok(())
+    }
+
+    #[test]
+    fn thread_item_from_exec_begin_sets_in_progress() {
+        let event = ExecCommandBeginEvent {
+            call_id: "call-1".to_string(),
+            command: vec!["echo".to_string(), "hi".to_string()],
+            cwd: PathBuf::from("/tmp"),
+            parsed_cmd: Vec::new(),
+            is_user_shell_command: false,
+        };
+
+        let item = thread_item_from_exec_begin(&event, format_exec_command(&event.command));
+
+        assert_eq!(
+            item,
+            ThreadItem::CommandExecution {
+                id: "call-1".to_string(),
+                command: "echo hi".to_string(),
+                aggregated_output: String::new(),
+                exit_code: None,
+                status: CommandExecutionStatus::InProgress,
+                duration_ms: None,
+            }
+        );
+    }
+
+    #[test]
+    fn thread_item_from_exec_end_sets_status_and_duration() {
+        let event = ExecCommandEndEvent {
+            call_id: "call-2".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            aggregated_output: "oops".to_string(),
+            exit_code: 1,
+            duration: Duration::from_millis(42),
+            formatted_output: String::new(),
+        };
+
+        let item = thread_item_from_exec_end(&event, event.call_id.clone(), "cmd".to_string());
+
+        assert_eq!(
+            item,
+            ThreadItem::CommandExecution {
+                id: "call-2".to_string(),
+                command: "cmd".to_string(),
+                aggregated_output: "oops".to_string(),
+                exit_code: Some(1),
+                status: CommandExecutionStatus::Failed,
+                duration_ms: Some(42),
+            }
+        );
     }
 
     #[tokio::test]
