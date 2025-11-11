@@ -23,6 +23,8 @@ use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::CancelLoginChatGptResponse;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
+use codex_app_server_protocol::CommandExecutionStatus as V2CommandExecutionStatus;
 use codex_app_server_protocol::ConversationGitInfo;
 use codex_app_server_protocol::ConversationSummary;
 use codex_app_server_protocol::ExecCommandApprovalParams;
@@ -191,6 +193,8 @@ pub(crate) struct CodexMessageProcessor {
     pending_interrupts: PendingInterrupts,
     pending_fuzzy_searches: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     feedback: CodexFeedback,
+    // Tracks running commands by call_id → (item_id, command_string)
+    running_commands: Arc<Mutex<HashMap<String, (String, String)>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -243,6 +247,7 @@ impl CodexMessageProcessor {
             pending_interrupts: Arc::new(Mutex::new(HashMap::new())),
             pending_fuzzy_searches: Arc::new(Mutex::new(HashMap::new())),
             feedback,
+            running_commands: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -2347,6 +2352,7 @@ impl CodexMessageProcessor {
 
         let outgoing_for_task = self.outgoing.clone();
         let pending_interrupts = self.pending_interrupts.clone();
+        let running_commands = self.running_commands.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -2402,6 +2408,7 @@ impl CodexMessageProcessor {
                             conversation.clone(),
                             outgoing_for_task.clone(),
                             pending_interrupts.clone(),
+                            running_commands.clone(),
                         )
                         .await;
                     }
@@ -2550,6 +2557,7 @@ async fn apply_bespoke_event_handling(
     conversation: Arc<CodexConversation>,
     outgoing: Arc<OutgoingMessageSender>,
     pending_interrupts: PendingInterrupts,
+    running_commands: Arc<Mutex<HashMap<String, (String, String)>>>,
 ) {
     let Event { id: event_id, msg } = event;
     match msg {
@@ -2625,6 +2633,91 @@ async fn apply_bespoke_event_handling(
                 .send_server_notification(ServerNotification::ItemCompleted(notification))
                 .await;
         }
+        // Translate old ExecCommand* events into v2 ThreadItem::CommandExecution
+        EventMsg::ExecCommandBegin(ev) => {
+            // Create a stable item id for this call and stringify the command.
+            let item_id = Uuid::now_v7().to_string();
+            let command_string = stringify_command(&ev.command);
+
+            // Track so we can complete the same item on ExecCommandEnd/OutputDelta
+            {
+                let mut map = running_commands.lock().await;
+                map.insert(
+                    ev.call_id.clone(),
+                    (item_id.clone(), command_string.clone()),
+                );
+            }
+
+            // Emit item.started with InProgress status
+            let item = ThreadItem::CommandExecution {
+                id: item_id,
+                command: command_string,
+                aggregated_output: String::new(),
+                exit_code: None,
+                status: V2CommandExecutionStatus::InProgress,
+                duration_ms: None,
+            };
+            let notification = ItemStartedNotification { item };
+            outgoing
+                .send_server_notification(ServerNotification::ItemStarted(notification))
+                .await;
+        }
+        EventMsg::ExecCommandEnd(ev) => {
+            // Look up the running item; if missing, synthesize a new id.
+            let (item_id, command_string) = {
+                let mut map = running_commands.lock().await;
+                match map.remove(&ev.call_id) {
+                    Some(pair) => pair,
+                    None => {
+                        warn!(
+                            call_id = ev.call_id,
+                            "ExecCommandEnd without matching ExecCommandBegin; synthesizing item id"
+                        );
+                        (Uuid::now_v7().to_string(), stringify_command(&Vec::new()))
+                    }
+                }
+            };
+
+            let status = if ev.exit_code == 0 {
+                V2CommandExecutionStatus::Completed
+            } else {
+                V2CommandExecutionStatus::Failed
+            };
+
+            let item = ThreadItem::CommandExecution {
+                id: item_id,
+                command: command_string,
+                aggregated_output: ev.aggregated_output.clone(),
+                exit_code: Some(ev.exit_code),
+                status,
+                duration_ms: Some(ev.duration.as_millis() as i64),
+            };
+            let notification = ItemCompletedNotification { item };
+            outgoing
+                .send_server_notification(ServerNotification::ItemCompleted(notification))
+                .await;
+        }
+        EventMsg::ExecCommandOutputDelta(ev) => {
+            // Map delta to the existing item id; if no mapping, skip.
+            let item_id_opt = {
+                let map = running_commands.lock().await;
+                map.get(&ev.call_id).map(|(id, _)| id.clone())
+            };
+            if let Some(item_id) = item_id_opt {
+                let delta = String::from_utf8_lossy(&ev.chunk).to_string();
+                let notification = CommandExecutionOutputDeltaNotification { item_id, delta };
+                outgoing
+                    .send_server_notification(ServerNotification::CommandExecutionOutputDelta(
+                        notification,
+                    ))
+                    .await;
+            } else {
+                warn!(
+                    call_id = ev.call_id,
+                    "ExecCommandOutputDelta without matching ExecCommandBegin; dropping delta"
+                );
+            }
+        }
         // If this is a TurnAborted, reply to any pending interrupt requests.
         EventMsg::TurnAborted(turn_aborted_event) => {
             let pending = {
@@ -2651,6 +2744,27 @@ async fn apply_bespoke_event_handling(
 
         _ => {}
     }
+}
+
+// Best-effort stringification of a command vector, quoting args with spaces.
+fn stringify_command(args: &[String]) -> String {
+    let mut out = String::new();
+    let mut first = true;
+    for a in args {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        if a.chars().any(char::is_whitespace) || a.contains('"') {
+            let escaped = a.replace('\\', "\\\\").replace('"', "\\\"");
+            out.push('"');
+            out.push_str(&escaped);
+            out.push('"');
+        } else {
+            out.push_str(a);
+        }
+    }
+    out
 }
 
 async fn derive_config_from_params(
