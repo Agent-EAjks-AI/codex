@@ -1196,7 +1196,6 @@ dependencies = [
  "anyhow",
  "clap",
  "multimap",
- "parking_lot",
  "pretty_assertions",
  "serde",
  "serde_json",
