@@ -24,9 +24,7 @@ use std::fs;
 async fn execpolicy2_blocks_shell_invocation() -> Result<()> {
     let mut builder = test_codex().with_config(|config| {
         config.features.enable(Feature::ExecPolicyV2);
-        let policy_dir = config.cwd.join(".codex");
-        fs::create_dir_all(&policy_dir).expect("create .codex directory");
-        let policy_path = policy_dir.join("policy.codexpolicy");
+        let policy_path = config.codex_home.join("policy.codexpolicy");
         fs::write(
             &policy_path,
             r#"prefix_rule(pattern=["echo"], decision="forbidden")"#,

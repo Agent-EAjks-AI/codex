@@ -41,19 +41,19 @@ pub enum ExecPolicyError {
 
 pub(crate) fn exec_policy_for(
     features: &Features,
-    cwd: &Path,
+    codex_home: &Path,
 ) -> Result<Option<Arc<Policy>>, ExecPolicyError> {
     if !features.enabled(Feature::ExecPolicyV2) {
         return Ok(None);
     }
 
-    let codex_dir = cwd.join(".codex");
-    let entries = match fs::read_dir(&codex_dir) {
+    let policy_dir = codex_home.to_path_buf();
+    let entries = match fs::read_dir(&policy_dir) {
         Ok(entries) => entries,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
             return Err(ExecPolicyError::ReadDir {
-                dir: codex_dir,
+                dir: policy_dir,
                 source,
             });
         }
@@ -62,7 +62,7 @@ pub(crate) fn exec_policy_for(
     let mut policy_paths: Vec<PathBuf> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| ExecPolicyError::ReadDir {
-            dir: codex_dir.clone(),
+            dir: policy_dir.clone(),
             source,
         })?;
         let path = entry.path();
@@ -98,7 +98,7 @@ pub(crate) fn exec_policy_for(
     tracing::debug!(
         file_count = policy_paths.len(),
         "loaded execpolicy2 from {}",
-        codex_dir.display()
+        policy_dir.display()
     );
 
     Ok(Some(policy))
@@ -153,12 +153,13 @@ mod tests {
     }
 
     #[test]
-    fn returns_none_when_codex_dir_is_missing() {
+    fn returns_none_when_policy_dir_is_missing() {
         let mut features = Features::with_defaults();
         features.enable(Feature::ExecPolicyV2);
         let temp_dir = tempdir().expect("create temp dir");
+        let missing_dir = temp_dir.path().join("missing");
 
-        let policy = exec_policy_for(&features, temp_dir.path()).expect("policy result");
+        let policy = exec_policy_for(&features, &missing_dir).expect("policy result");
 
         assert!(policy.is_none());
     }

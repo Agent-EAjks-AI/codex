@@ -168,8 +168,9 @@ impl Codex {
 
         let user_instructions = get_user_instructions(&config).await;
 
-        let exec_policy_v2 = crate::exec_policy::exec_policy_for(&config.features, &config.cwd)
-            .map_err(|err| CodexErr::Fatal(format!("failed to load execpolicy2: {err}")))?;
+        let exec_policy_v2 =
+            crate::exec_policy::exec_policy_for(&config.features, &config.codex_home)
+                .map_err(|err| CodexErr::Fatal(format!("failed to load execpolicy2: {err}")))?;
 
         let config = Arc::new(config);
 
