@@ -331,6 +331,9 @@ pub struct ShellCommandToolCallParams {
     pub command: String,
     pub workdir: Option<String>,
 
+    /// Whether to run the shell with login shell semantics
+    #[serde(default = "default_login")]
+    pub login: bool,
     /// This is the maximum time in milliseconds that the command is allowed to run.
     #[serde(alias = "timeout")]
     pub timeout_ms: Option<u64>,
@@ -338,6 +341,10 @@ pub struct ShellCommandToolCallParams {
     pub with_escalated_permissions: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub justification: Option<String>,
+}
+
+fn default_login() -> bool {
+    true
 }
 
 /// Responses API compatible content items that can be returned by a tool call.
