@@ -443,6 +443,7 @@ impl UnifiedExecSessionManager {
         justification: Option<String>,
         context: &UnifiedExecContext,
     ) -> Result<UnifiedExecSession, UnifiedExecError> {
+        let features = context.session.features().await;
         let mut orchestrator = ToolOrchestrator::new();
         let mut runtime = UnifiedExecRuntime::new(self);
         let exec_policy = context.session.current_exec_policy().await;
@@ -457,6 +458,7 @@ impl UnifiedExecSessionManager {
                 &exec_policy,
                 command,
                 context.turn.approval_policy,
+                &features,
                 &context.turn.sandbox_policy,
                 SandboxPermissions::from(with_escalated_permissions.unwrap_or(false)),
             ),
