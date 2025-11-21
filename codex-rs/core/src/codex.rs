@@ -1590,19 +1590,18 @@ mod handlers {
         decision: ReviewDecision,
         allow_prefix: Option<Vec<String>>,
     ) {
-        if let Some(prefix) = allow_prefix {
-            if matches!(decision, ReviewDecision::ApprovedAllowPrefix)
-                && let Err(err) = sess.persist_command_allow_prefix(&prefix).await
-            {
-                let message = format!("Failed to update execpolicy allow list: {err}");
-                tracing::warn!("{message}");
-                let warning = EventMsg::Warning(WarningEvent { message });
-                sess.send_event_raw(Event {
-                    id: id.clone(),
-                    msg: warning,
-                })
-                .await;
-            }
+        if let Some(prefix) = allow_prefix
+            && matches!(decision, ReviewDecision::ApprovedAllowPrefix)
+            && let Err(err) = sess.persist_command_allow_prefix(&prefix).await
+        {
+            let message = format!("Failed to update execpolicy allow list: {err}");
+            tracing::warn!("{message}");
+            let warning = EventMsg::Warning(WarningEvent { message });
+            sess.send_event_raw(Event {
+                id: id.clone(),
+                msg: warning,
+            })
+            .await;
         }
         match decision {
             ReviewDecision::Abort => {
