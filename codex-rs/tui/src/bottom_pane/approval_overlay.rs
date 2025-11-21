@@ -150,9 +150,9 @@ impl ApprovalOverlay {
             return;
         };
         if let Some(variant) = self.current_variant.as_ref() {
-            match (&variant, option.decision) {
+            match (&variant, option.decision.clone()) {
                 (ApprovalVariant::Exec { id, command, .. }, decision) => {
-                    self.handle_exec_decision(id, command, decision, option.allow_prefix.clone());
+                    self.handle_exec_decision(id, command, decision);
                 }
                 (ApprovalVariant::ApplyPatch { id, .. }, decision) => {
                     self.handle_patch_decision(id, decision);
@@ -164,19 +164,14 @@ impl ApprovalOverlay {
         self.advance_queue();
     }
 
-    fn handle_exec_decision(
-        &self,
-        id: &str,
-        command: &[String],
-        decision: ReviewDecision,
-        allow_prefix: Option<Vec<String>>,
-    ) {
-        let cell = history_cell::new_approval_decision_cell(command.to_vec(), decision);
+    fn handle_exec_decision(&self, id: &str, command: &[String], decision: ReviewDecision) {
+        let decision_for_history = decision.clone();
+        let cell =
+            history_cell::new_approval_decision_cell(command.to_vec(), decision_for_history);
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
         self.app_event_tx.send(AppEvent::CodexOp(Op::ExecApproval {
             id: id.to_string(),
             decision,
-            allow_prefix,
         }));
     }
 
@@ -247,7 +242,7 @@ impl BottomPaneView for ApprovalOverlay {
         {
             match &variant {
                 ApprovalVariant::Exec { id, command, .. } => {
-                    self.handle_exec_decision(id, command, ReviewDecision::Abort, None);
+                    self.handle_exec_decision(id, command, ReviewDecision::Abort);
                 }
                 ApprovalVariant::ApplyPatch { id, .. } => {
                     self.handle_patch_decision(id, ReviewDecision::Abort);
@@ -393,7 +388,6 @@ struct ApprovalOption {
     decision: ReviewDecision,
     display_shortcut: Option<KeyBinding>,
     additional_shortcuts: Vec<KeyBinding>,
-    allow_prefix: Option<Vec<String>>,
 }
 
 impl ApprovalOption {
@@ -411,30 +405,28 @@ fn exec_options(allow_prefix: Option<Vec<String>>) -> Vec<ApprovalOption> {
             decision: ReviewDecision::Approved,
             display_shortcut: None,
             additional_shortcuts: vec![key_hint::plain(KeyCode::Char('y'))],
-            allow_prefix: None,
         },
         ApprovalOption {
             label: "Yes, and don't ask again for this command".to_string(),
             decision: ReviewDecision::ApprovedForSession,
             display_shortcut: None,
             additional_shortcuts: vec![key_hint::plain(KeyCode::Char('a'))],
-            allow_prefix: None,
         },
     ]
     .into_iter()
     .chain(allow_prefix.map(|prefix| ApprovalOption {
         label: "Yes, and don't ask again for commands with this prefix".to_string(),
-        decision: ReviewDecision::ApprovedAllowPrefix,
+        decision: ReviewDecision::ApprovedAllowPrefix {
+            allow_prefix: prefix,
+        },
         display_shortcut: None,
         additional_shortcuts: vec![key_hint::plain(KeyCode::Char('p'))],
-        allow_prefix: Some(prefix),
     }))
     .chain([ApprovalOption {
         label: "No, and tell Codex what to do differently".to_string(),
         decision: ReviewDecision::Abort,
         display_shortcut: Some(key_hint::plain(KeyCode::Esc)),
         additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
-        allow_prefix: None,
     }])
     .collect()
 }
@@ -446,14 +438,12 @@ fn patch_options() -> Vec<ApprovalOption> {
             decision: ReviewDecision::Approved,
             display_shortcut: None,
             additional_shortcuts: vec![key_hint::plain(KeyCode::Char('y'))],
-            allow_prefix: None,
         },
         ApprovalOption {
             label: "No, and tell Codex what to do differently".to_string(),
             decision: ReviewDecision::Abort,
             display_shortcut: Some(key_hint::plain(KeyCode::Esc)),
             additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
-            allow_prefix: None,
         },
     ]
 }
@@ -521,14 +511,13 @@ mod tests {
         view.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
         let mut saw_op = false;
         while let Ok(ev) = rx.try_recv() {
-            if let AppEvent::CodexOp(Op::ExecApproval {
-                allow_prefix,
-                decision,
-                ..
-            }) = ev
-            {
-                assert_eq!(decision, ReviewDecision::ApprovedAllowPrefix);
-                assert_eq!(allow_prefix, Some(vec!["echo".to_string()]));
+            if let AppEvent::CodexOp(Op::ExecApproval { decision, .. }) = ev {
+                match decision {
+                    ReviewDecision::ApprovedAllowPrefix { allow_prefix } => {
+                        assert_eq!(allow_prefix, vec!["echo".to_string()]);
+                    }
+                    other => panic!("unexpected decision: {other:?}"),
+                }
                 saw_op = true;
                 break;
             }

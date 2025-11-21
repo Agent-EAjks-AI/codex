@@ -87,14 +87,14 @@ impl ToolOrchestrator {
                 };
                 let decision = tool.start_approval_async(req, approval_ctx).await;
 
-                otel.tool_decision(otel_tn, otel_ci, decision, otel_user.clone());
+                otel.tool_decision(otel_tn, otel_ci, decision.clone(), otel_user.clone());
 
                 match decision {
                     ReviewDecision::Denied | ReviewDecision::Abort => {
                         return Err(ToolError::Rejected("rejected by user".to_string()));
                     }
                     ReviewDecision::Approved
-                    | ReviewDecision::ApprovedAllowPrefix
+                    | ReviewDecision::ApprovedAllowPrefix { .. }
                     | ReviewDecision::ApprovedForSession => {}
                 }
                 already_approved = true;
@@ -169,14 +169,14 @@ impl ToolOrchestrator {
                     };
 
                     let decision = tool.start_approval_async(req, approval_ctx).await;
-                    otel.tool_decision(otel_tn, otel_ci, decision, otel_user);
+                    otel.tool_decision(otel_tn, otel_ci, decision.clone(), otel_user);
 
                     match decision {
                         ReviewDecision::Denied | ReviewDecision::Abort => {
                             return Err(ToolError::Rejected("rejected by user".to_string()));
                         }
                         ReviewDecision::Approved
-                        | ReviewDecision::ApprovedAllowPrefix
+                        | ReviewDecision::ApprovedAllowPrefix { .. }
                         | ReviewDecision::ApprovedForSession => {}
                     }
                 }

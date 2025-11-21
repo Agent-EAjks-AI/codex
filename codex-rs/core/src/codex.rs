@@ -1424,12 +1424,8 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 handlers::user_input_or_turn(&sess, sub.id.clone(), sub.op, &mut previous_context)
                     .await;
             }
-            Op::ExecApproval {
-                id,
-                decision,
-                allow_prefix,
-            } => {
-                handlers::exec_approval(&sess, id, decision, allow_prefix).await;
+            Op::ExecApproval { id, decision } => {
+                handlers::exec_approval(&sess, id, decision).await;
             }
             Op::PatchApproval { id, decision } => {
                 handlers::patch_approval(&sess, id, decision).await;
@@ -1584,15 +1580,9 @@ mod handlers {
         *previous_context = Some(turn_context);
     }
 
-    pub async fn exec_approval(
-        sess: &Arc<Session>,
-        id: String,
-        decision: ReviewDecision,
-        allow_prefix: Option<Vec<String>>,
-    ) {
-        if let Some(prefix) = allow_prefix
-            && matches!(decision, ReviewDecision::ApprovedAllowPrefix)
-            && let Err(err) = sess.persist_command_allow_prefix(&prefix).await
+    pub async fn exec_approval(sess: &Arc<Session>, id: String, decision: ReviewDecision) {
+        if let ReviewDecision::ApprovedAllowPrefix { allow_prefix } = &decision
+            && let Err(err) = sess.persist_command_allow_prefix(allow_prefix).await
         {
             let message = format!("Failed to update execpolicy allow list: {err}");
             tracing::warn!("{message}");
