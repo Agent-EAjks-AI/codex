@@ -460,7 +460,7 @@ prefix_rule(pattern=["rm"], decision="forbidden")
             .expect("policy file should have been created");
         assert_eq!(
             contents,
-            "prefix_rule(pattern=[\"echo\", \"hello\"], decision=\"allow\")\n"
+            "prefix_rule(pattern=[\"echo\",\"hello\"], decision=\"allow\")\n"
         );
     }
 
