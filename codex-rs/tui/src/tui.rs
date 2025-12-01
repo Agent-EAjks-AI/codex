@@ -24,7 +24,6 @@ use crossterm::event::PushKeyboardEnhancementFlags;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use crossterm::terminal::supports_keyboard_enhancement;
-use ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::disable_raw_mode;
@@ -356,25 +355,25 @@ impl Tui {
             area.height = height.min(size.height);
             area.width = size.width;
             // If the viewport has expanded, scroll everything else up to make room.
-            if area.bottom() > size.height {
-                terminal
-                    .backend_mut()
-                    .scroll_region_up(0..area.top(), area.bottom() - size.height)?;
-                area.y = size.height - area.height;
-            }
+            // if area.bottom() > size.height {
+            //     terminal
+            //         .backend_mut()
+            //         .scroll_region_up(0..area.top(), area.bottom() - size.height)?;
+            //     area.y = size.height - area.height;
+            // }
             if area != terminal.viewport_area {
                 // TODO(nornagon): probably this could be collapsed with the clear + set_viewport_area above.
                 terminal.clear()?;
                 terminal.set_viewport_area(area);
             }
 
-            if !self.pending_history_lines.is_empty() {
-                crate::insert_history::insert_history_lines(
-                    terminal,
-                    self.pending_history_lines.clone(),
-                )?;
-                self.pending_history_lines.clear();
-            }
+            // if !self.pending_history_lines.is_empty() {
+            //     crate::insert_history::insert_history_lines(
+            //         terminal,
+            //         self.pending_history_lines.clone(),
+            //     )?;
+            //     self.pending_history_lines.clear();
+            // }
 
             // Update the y position for suspending so Ctrl-Z can place the cursor correctly.
             #[cfg(unix)]
