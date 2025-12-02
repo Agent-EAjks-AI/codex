@@ -429,8 +429,8 @@ impl App {
                 TuiEvent::Key(key_event) => {
                     self.handle_key_event(tui, key_event).await;
                 }
-                TuiEvent::Mouse(_) => {
-                    // Mouse scroll for transcript not yet implemented.
+                TuiEvent::Mouse(mouse_event) => {
+                    self.handle_mouse_event(tui, mouse_event);
                 }
                 TuiEvent::Paste(pasted) => {
                     // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
@@ -448,6 +448,7 @@ impl App {
                     {
                         return Ok(true);
                     }
+                    let cells = self.transcript_cells.clone();
                     tui.draw(
                         //self.chat_widget.desired_height(tui.terminal.size()?.width),
                         tui.terminal.size()?.height,
@@ -464,7 +465,7 @@ impl App {
                             if let Some((x, y)) = self.chat_widget.cursor_pos(chat_area) {
                                 frame.set_cursor_position((x, y));
                             }
-                            self.render_transcript_cells(frame, &self.transcript_cells);
+                            self.render_transcript_cells(frame, &cells);
                         },
                     )?;
                 }
@@ -473,8 +474,8 @@ impl App {
         Ok(true)
     }
 
-pub(crate) fn render_transcript_cells(
-        &self,
+    pub(crate) fn render_transcript_cells(
+        &mut self,
         frame: &mut Frame,
         cells: &[Arc<dyn HistoryCell>],
     ) {
@@ -494,6 +495,16 @@ pub(crate) fn render_transcript_cells(
         }
 
         if cells.is_empty() {
+            Clear.render_ref(
+                Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: area.width,
+                    height: transcript_height,
+                },
+                frame.buffer,
+            );
+            self.transcript_scroll = TranscriptScroll::ToBottom;
             return;
         }
 
@@ -504,37 +515,45 @@ pub(crate) fn render_transcript_cells(
             height: transcript_height,
         };
 
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        let mut has_emitted_lines = false;
-
-        for cell in cells {
-            let mut cell_lines = cell.display_lines(transcript_area.width);
-            if cell_lines.is_empty() {
-                continue;
-            }
-
-            if !cell.is_stream_continuation() {
-                if has_emitted_lines {
-                    lines.push(Line::from(""));
-                } else {
-                    has_emitted_lines = true;
-                }
-            }
-
-            lines.append(&mut cell_lines);
-        }
+        let (lines, meta) = build_transcript_lines(cells, transcript_area.width);
 
         if lines.is_empty() {
+            Clear.render_ref(transcript_area, frame.buffer);
+            self.transcript_scroll = TranscriptScroll::ToBottom;
             return;
         }
 
-        Clear.render_ref(transcript_area, frame.buffer);
-
         let total_lines = lines.len();
         let max_visible = transcript_area.height as usize;
-        let start_index = total_lines.saturating_sub(max_visible);
+        let max_start = total_lines.saturating_sub(max_visible);
 
-        for (row_index, line_index) in (start_index..total_lines).enumerate() {
+        let top_offset = match self.transcript_scroll {
+            TranscriptScroll::ToBottom => max_start,
+            TranscriptScroll::Scrolled {
+                cell_index,
+                line_in_cell,
+            } => {
+                let mut anchor = None;
+                for (idx, entry) in meta.iter().enumerate() {
+                    if let Some((ci, li)) = entry {
+                        if *ci == cell_index && *li == line_in_cell {
+                            anchor = Some(idx);
+                            break;
+                        }
+                    }
+                }
+                if let Some(idx) = anchor {
+                    idx.min(max_start)
+                } else {
+                    self.transcript_scroll = TranscriptScroll::ToBottom;
+                    max_start
+                }
+            }
+        };
+
+        Clear.render_ref(transcript_area, frame.buffer);
+
+        for (row_index, line_index) in (top_offset..total_lines).enumerate() {
             if row_index >= max_visible {
                 break;
             }
@@ -547,6 +566,120 @@ pub(crate) fn render_transcript_cells(
             };
             lines[line_index].render_ref(row_area, frame.buffer);
         }
+    }
+
+    fn handle_mouse_event(&mut self, tui: &mut tui::Tui, event: crossterm::event::MouseEvent) {
+        if self.overlay.is_some() {
+            return;
+        }
+        match event.kind {
+            crossterm::event::MouseEventKind::ScrollUp => {
+                self.scroll_transcript(tui, -3);
+            }
+            crossterm::event::MouseEventKind::ScrollDown => {
+                self.scroll_transcript(tui, 3);
+            }
+            _ => {}
+        }
+    }
+
+    fn scroll_transcript(&mut self, tui: &tui::Tui, delta_lines: isize) {
+        if self.transcript_cells.is_empty() {
+            return;
+        }
+
+        let size = tui.terminal.last_known_screen_size;
+        let width = size.width;
+        let height = size.height;
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let chat_height = self.chat_widget.desired_height(width);
+        if chat_height >= height {
+            return;
+        }
+
+        let transcript_height = height.saturating_sub(chat_height);
+        if transcript_height == 0 {
+            return;
+        }
+
+        let visible_lines = transcript_height as usize;
+        if visible_lines == 0 {
+            return;
+        }
+
+        let (lines, meta) = build_transcript_lines(&self.transcript_cells, width);
+        let total_lines = lines.len();
+        if total_lines <= visible_lines {
+            self.transcript_scroll = TranscriptScroll::ToBottom;
+            return;
+        }
+
+        let max_start = total_lines.saturating_sub(visible_lines);
+
+        let current_top = match self.transcript_scroll {
+            TranscriptScroll::ToBottom => max_start,
+            TranscriptScroll::Scrolled {
+                cell_index,
+                line_in_cell,
+            } => {
+                let mut anchor = None;
+                for (idx, entry) in meta.iter().enumerate() {
+                    if let Some((ci, li)) = entry {
+                        if *ci == cell_index && *li == line_in_cell {
+                            anchor = Some(idx);
+                            break;
+                        }
+                    }
+                }
+                anchor.unwrap_or(max_start).min(max_start)
+            }
+        };
+
+        if delta_lines == 0 {
+            return;
+        }
+
+        let new_top = if delta_lines < 0 {
+            current_top.saturating_sub(delta_lines.unsigned_abs() as usize)
+        } else {
+            current_top.saturating_add(delta_lines as usize).min(max_start)
+        };
+
+        if new_top == max_start {
+            self.transcript_scroll = TranscriptScroll::ToBottom;
+        } else {
+            let mut anchor = None;
+            for idx in new_top..meta.len() {
+                if let Some((ci, li)) = meta[idx] {
+                    anchor = Some((ci, li));
+                    break;
+                }
+            }
+            if let Some((cell_index, line_in_cell)) = anchor {
+                self.transcript_scroll = TranscriptScroll::Scrolled {
+                    cell_index,
+                    line_in_cell,
+                };
+            } else if let Some(prev_idx) =
+                (0..=new_top).rfind(|&idx| meta[idx].is_some())
+            {
+                if let Some((cell_index, line_in_cell)) = meta[prev_idx] {
+                    self.transcript_scroll = TranscriptScroll::Scrolled {
+                        cell_index,
+                        line_in_cell,
+                    };
+                } else {
+                    self.transcript_scroll = TranscriptScroll::ToBottom;
+                }
+            } else {
+                self.transcript_scroll = TranscriptScroll::ToBottom;
+            }
+        }
+
+        tui.frame_requester().schedule_frame();
     }
 
     async fn handle_event(&mut self, tui: &mut tui::Tui, event: AppEvent) -> Result<bool> {
@@ -1112,6 +1245,38 @@ fn migration_prompt_allows_auth_mode(
     } else {
         auth_mode != Some(AuthMode::ApiKey)
     }
+}
+
+fn build_transcript_lines(
+    cells: &[Arc<dyn HistoryCell>],
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<Option<(usize, usize)>>) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut meta: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut has_emitted_lines = false;
+
+    for (cell_index, cell) in cells.iter().enumerate() {
+        let mut cell_lines = cell.display_lines(width);
+        if cell_lines.is_empty() {
+            continue;
+        }
+
+        if !cell.is_stream_continuation() {
+            if has_emitted_lines {
+                lines.push(Line::from(""));
+                meta.push(None);
+            } else {
+                has_emitted_lines = true;
+            }
+        }
+
+        for (line_in_cell, line) in cell_lines.into_iter().enumerate() {
+            meta.push(Some((cell_index, line_in_cell)));
+            lines.push(line);
+        }
+    }
+
+    (lines, meta)
 }
 
 #[cfg(test)]
