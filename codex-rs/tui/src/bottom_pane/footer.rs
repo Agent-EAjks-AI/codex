@@ -20,6 +20,7 @@ pub(crate) struct FooterProps {
     pub(crate) context_window_percent: Option<i64>,
     pub(crate) transcript_scrolled: bool,
     pub(crate) transcript_selection_active: bool,
+    pub(crate) transcript_scroll_position: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,6 +100,10 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
                 line.push_span("/");
                 line.push_span(key_hint::plain(KeyCode::End));
                 line.push_span(" jump".dim());
+                if let Some((current, total)) = props.transcript_scroll_position {
+                    line.push_span(" · ".dim());
+                    line.push_span(Span::from(format!("{current}/{total}")).dim());
+                }
             }
             if props.transcript_selection_active {
                 line.push_span(" · ".dim());
@@ -420,6 +425,7 @@ mod tests {
                 context_window_percent: None,
                 transcript_scrolled: false,
                 transcript_selection_active: false,
+                transcript_scroll_position: None,
             },
         );
 
@@ -433,6 +439,7 @@ mod tests {
                 context_window_percent: None,
                 transcript_scrolled: false,
                 transcript_selection_active: false,
+                transcript_scroll_position: None,
             },
         );
 
@@ -446,6 +453,7 @@ mod tests {
                 context_window_percent: None,
                 transcript_scrolled: false,
                 transcript_selection_active: false,
+                transcript_scroll_position: None,
             },
         );
 
@@ -459,6 +467,7 @@ mod tests {
                 context_window_percent: None,
                 transcript_scrolled: false,
                 transcript_selection_active: false,
+                transcript_scroll_position: None,
             },
         );
 
@@ -472,6 +481,7 @@ mod tests {
                 context_window_percent: None,
                 transcript_scrolled: false,
                 transcript_selection_active: false,
+                transcript_scroll_position: None,
             },
         );
 
@@ -485,6 +495,7 @@ mod tests {
                 context_window_percent: None,
                 transcript_scrolled: false,
                 transcript_selection_active: false,
+                transcript_scroll_position: None,
             },
         );
 
@@ -498,6 +509,7 @@ mod tests {
                 context_window_percent: Some(72),
                 transcript_scrolled: false,
                 transcript_selection_active: false,
+                transcript_scroll_position: None,
             },
         );
     }

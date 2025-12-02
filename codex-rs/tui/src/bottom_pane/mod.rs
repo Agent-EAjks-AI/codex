@@ -366,9 +366,14 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub(crate) fn set_transcript_ui_state(&mut self, scrolled: bool, selection_active: bool) {
+    pub(crate) fn set_transcript_ui_state(
+        &mut self,
+        scrolled: bool,
+        selection_active: bool,
+        scroll_position: Option<(usize, usize)>,
+    ) {
         self.composer
-            .set_transcript_ui_state(scrolled, selection_active);
+            .set_transcript_ui_state(scrolled, selection_active, scroll_position);
         self.request_redraw();
     }
 

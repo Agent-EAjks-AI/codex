@@ -115,6 +115,7 @@ pub(crate) struct ChatComposer {
     context_window_percent: Option<i64>,
     transcript_scrolled: bool,
     transcript_selection_active: bool,
+    transcript_scroll_position: Option<(usize, usize)>,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -160,6 +161,7 @@ impl ChatComposer {
             context_window_percent: None,
             transcript_scrolled: false,
             transcript_selection_active: false,
+            transcript_scroll_position: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -1393,6 +1395,7 @@ impl ChatComposer {
             context_window_percent: self.context_window_percent,
             transcript_scrolled: self.transcript_scrolled,
             transcript_selection_active: self.transcript_selection_active,
+            transcript_scroll_position: self.transcript_scroll_position,
         }
     }
 
@@ -1523,9 +1526,15 @@ impl ChatComposer {
         self.is_task_running = running;
     }
 
-    pub(crate) fn set_transcript_ui_state(&mut self, scrolled: bool, selection_active: bool) {
+    pub(crate) fn set_transcript_ui_state(
+        &mut self,
+        scrolled: bool,
+        selection_active: bool,
+        scroll_position: Option<(usize, usize)>,
+    ) {
         self.transcript_scrolled = scrolled;
         self.transcript_selection_active = selection_active;
+        self.transcript_scroll_position = scroll_position;
     }
 
     pub(crate) fn set_context_window_percent(&mut self, percent: Option<i64>) {

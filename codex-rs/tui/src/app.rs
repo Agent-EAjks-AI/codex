@@ -216,6 +216,7 @@ pub(crate) struct App {
     transcript_scroll: TranscriptScroll,
     transcript_selection: TranscriptSelection,
     transcript_view_top: usize,
+    transcript_total_lines: usize,
 
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
@@ -363,6 +364,7 @@ impl App {
             transcript_scroll: TranscriptScroll::ToBottom,
             transcript_selection: TranscriptSelection::default(),
             transcript_view_top: 0,
+            transcript_total_lines: 0,
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
@@ -455,15 +457,6 @@ impl App {
                     self.chat_widget.handle_paste(pasted);
                 }
                 TuiEvent::Draw => {
-                    let transcript_scrolled =
-                        !matches!(self.transcript_scroll, TranscriptScroll::ToBottom);
-                    let selection_active = matches!(
-                        (self.transcript_selection.anchor, self.transcript_selection.head),
-                        (Some(a), Some(b)) if a != b
-                    );
-                    self.chat_widget
-                        .set_transcript_ui_state(transcript_scrolled, selection_active);
-
                     self.chat_widget.maybe_post_pending_notification(tui);
                     if self
                         .chat_widget
@@ -489,6 +482,26 @@ impl App {
                                 frame.set_cursor_position((x, y));
                             }
                             self.render_transcript_cells(frame, &cells);
+
+                            let transcript_scrolled =
+                                !matches!(self.transcript_scroll, TranscriptScroll::ToBottom);
+                            let selection_active = matches!(
+                                (self.transcript_selection.anchor, self.transcript_selection.head),
+                                (Some(a), Some(b)) if a != b
+                            );
+                            let scroll_position = if self.transcript_total_lines == 0 {
+                                None
+                            } else {
+                                Some((
+                                    self.transcript_view_top.saturating_add(1),
+                                    self.transcript_total_lines,
+                                ))
+                            };
+                            self.chat_widget.set_transcript_ui_state(
+                                transcript_scrolled,
+                                selection_active,
+                                scroll_position,
+                            );
                         },
                     )?;
                 }
@@ -529,6 +542,7 @@ impl App {
             );
             self.transcript_scroll = TranscriptScroll::ToBottom;
             self.transcript_view_top = 0;
+            self.transcript_total_lines = 0;
             return;
         }
 
@@ -549,10 +563,13 @@ impl App {
         if lines.is_empty() {
             Clear.render_ref(transcript_area, frame.buffer);
             self.transcript_scroll = TranscriptScroll::ToBottom;
+            self.transcript_view_top = 0;
+            self.transcript_total_lines = 0;
             return;
         }
 
         let total_lines = lines.len();
+        self.transcript_total_lines = total_lines;
         let max_visible = transcript_area.height as usize;
         let max_start = total_lines.saturating_sub(max_visible);
 
@@ -1569,6 +1586,7 @@ mod tests {
             transcript_scroll: TranscriptScroll::ToBottom,
             transcript_selection: TranscriptSelection::default(),
             transcript_view_top: 0,
+            transcript_total_lines: 0,
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
@@ -1609,6 +1627,7 @@ mod tests {
                 transcript_scroll: TranscriptScroll::ToBottom,
                 transcript_selection: TranscriptSelection::default(),
                 transcript_view_top: 0,
+                transcript_total_lines: 0,
                 overlay: None,
                 deferred_history_lines: Vec::new(),
                 has_emitted_history_lines: false,
