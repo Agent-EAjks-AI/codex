@@ -304,6 +304,9 @@ fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
     for line in exit_info.session_lines.iter() {
         println!("{line}");
     }
+    if !exit_info.session_lines.is_empty() {
+        println!();
+    }
     for line in format_exit_messages(exit_info, color_enabled) {
         println!("{line}");
     }

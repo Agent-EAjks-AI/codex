@@ -25,6 +25,9 @@ fn main() -> anyhow::Result<()> {
         for line in exit_info.session_lines.iter() {
             println!("{line}");
         }
+        if !exit_info.session_lines.is_empty() {
+            println!();
+        }
         let token_usage = exit_info.token_usage;
         if !token_usage.is_zero() {
             println!("{}", codex_core::protocol::FinalOutput::from(token_usage),);

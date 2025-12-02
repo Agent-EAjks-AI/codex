@@ -433,15 +433,7 @@ impl App {
             Vec::new()
         } else {
             let (lines, _) = build_transcript_lines(&app.transcript_cells, width);
-            lines
-                .into_iter()
-                .map(|line| {
-                    line.spans
-                        .iter()
-                        .map(|span| span.content.as_ref())
-                        .collect::<String>()
-                })
-                .collect()
+            render_lines_to_ansi(&lines)
         };
 
         tui.terminal.clear()?;
@@ -1724,6 +1716,25 @@ fn build_transcript_lines(
     }
 
     (lines, meta)
+}
+
+fn render_lines_to_ansi(lines: &[Line<'static>]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| {
+            let merged_spans: Vec<ratatui::text::Span<'static>> = line
+                .spans
+                .iter()
+                .map(|s| ratatui::text::Span {
+                    style: s.style.patch(line.style),
+                    content: s.content.clone(),
+                })
+                .collect();
+            let mut buf: Vec<u8> = Vec::new();
+            let _ = crate::insert_history::write_spans(&mut buf, merged_spans.iter());
+            String::from_utf8(buf).unwrap_or_default()
+        })
+        .collect()
 }
 
 #[cfg(test)]
