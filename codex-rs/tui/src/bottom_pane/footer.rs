@@ -91,7 +91,14 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
             ]);
             if props.transcript_scrolled {
                 line.push_span(" · ".dim());
-                line.push_span("scrollback".dim());
+                line.push_span(key_hint::plain(KeyCode::PageUp));
+                line.push_span("/");
+                line.push_span(key_hint::plain(KeyCode::PageDown));
+                line.push_span(" scroll · ".dim());
+                line.push_span(key_hint::plain(KeyCode::Home));
+                line.push_span("/");
+                line.push_span(key_hint::plain(KeyCode::End));
+                line.push_span(" jump".dim());
             }
             if props.transcript_selection_active {
                 line.push_span(" · ".dim());
