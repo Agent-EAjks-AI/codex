@@ -432,8 +432,13 @@ impl App {
         let session_lines = if width == 0 {
             Vec::new()
         } else {
-            let (lines, _) = build_transcript_lines(&app.transcript_cells, width);
-            render_lines_to_ansi(&lines)
+            let (lines, meta) = build_transcript_lines(&app.transcript_cells, width);
+            let is_user_cell: Vec<bool> = app
+                .transcript_cells
+                .iter()
+                .map(|c| c.as_any().is::<UserHistoryCell>())
+                .collect();
+            render_lines_to_ansi(&lines, &meta, &is_user_cell, width)
         };
 
         tui.terminal.clear()?;
@@ -1718,11 +1723,23 @@ fn build_transcript_lines(
     (lines, meta)
 }
 
-fn render_lines_to_ansi(lines: &[Line<'static>]) -> Vec<String> {
+fn render_lines_to_ansi(
+    lines: &[Line<'static>],
+    meta: &[Option<(usize, usize)>],
+    is_user_cell: &[bool],
+    width: u16,
+) -> Vec<String> {
     lines
         .iter()
-        .map(|line| {
-            let merged_spans: Vec<ratatui::text::Span<'static>> = line
+        .enumerate()
+        .map(|(idx, line)| {
+            let is_user_row = meta
+                .get(idx)
+                .and_then(|entry| entry.as_ref())
+                .map(|(cell_index, _)| is_user_cell.get(*cell_index).copied().unwrap_or(false))
+                .unwrap_or(false);
+
+            let mut merged_spans: Vec<ratatui::text::Span<'static>> = line
                 .spans
                 .iter()
                 .map(|s| ratatui::text::Span {
@@ -1730,6 +1747,23 @@ fn render_lines_to_ansi(lines: &[Line<'static>]) -> Vec<String> {
                     content: s.content.clone(),
                 })
                 .collect();
+
+            if is_user_row && width > 0 {
+                let text: String = merged_spans.iter().map(|s| s.content.as_ref()).collect();
+                let text_width = unicode_width::UnicodeWidthStr::width(text.as_str());
+                let total_width = usize::from(width);
+                if text_width < total_width {
+                    let pad_len = total_width.saturating_sub(text_width);
+                    if pad_len > 0 {
+                        let pad_style = crate::style::user_message_style();
+                        merged_spans.push(ratatui::text::Span {
+                            style: pad_style,
+                            content: " ".repeat(pad_len).into(),
+                        });
+                    }
+                }
+            }
+
             let mut buf: Vec<u8> = Vec::new();
             let _ = crate::insert_history::write_spans(&mut buf, merged_spans.iter());
             String::from_utf8(buf).unwrap_or_default()
