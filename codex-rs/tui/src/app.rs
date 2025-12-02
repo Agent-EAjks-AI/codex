@@ -43,8 +43,11 @@ use color_eyre::eyre::WrapErr;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::MouseButton;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use ratatui::style::Stylize;
+use ratatui::buffer::Buffer;
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
@@ -210,6 +213,7 @@ pub(crate) struct App {
 
     pub(crate) transcript_cells: Vec<Arc<dyn HistoryCell>>,
     transcript_scroll: TranscriptScroll,
+    transcript_selection: TranscriptSelection,
 
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
@@ -248,6 +252,12 @@ impl Default for TranscriptScroll {
     fn default() -> Self {
         TranscriptScroll::ToBottom
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TranscriptSelection {
+    anchor: Option<(u16, u16)>,
+    head: Option<(u16, u16)>,
 }
 
 impl App {
@@ -349,6 +359,7 @@ impl App {
             enhanced_keys_supported,
             transcript_cells: Vec::new(),
             transcript_scroll: TranscriptScroll::ToBottom,
+            transcript_selection: TranscriptSelection::default(),
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
@@ -566,18 +577,145 @@ impl App {
             };
             lines[line_index].render_ref(row_area, frame.buffer);
         }
+
+        self.apply_transcript_selection(transcript_area, frame.buffer);
+    }
+
+    fn apply_transcript_selection(&self, area: Rect, buf: &mut Buffer) {
+        let (anchor, head) = match (self.transcript_selection.anchor, self.transcript_selection.head)
+        {
+            (Some(a), Some(h)) => (a, h),
+            _ => return,
+        };
+
+        let mut start = anchor;
+        let mut end = head;
+        if (end.1 < start.1) || (end.1 == start.1 && end.0 < start.0) {
+            std::mem::swap(&mut start, &mut end);
+        }
+
+        let base_x = area.x.saturating_add(2);
+        let max_x = area.right().saturating_sub(1);
+
+        for y in area.y..area.bottom() {
+            if y < start.1 || y > end.1 {
+                continue;
+            }
+
+            let mut first_text_x = None;
+            let mut last_text_x = None;
+            for x in base_x..=max_x {
+                let cell = &buf[(x, y)];
+                if cell.symbol() != " " {
+                    if first_text_x.is_none() {
+                        first_text_x = Some(x);
+                    }
+                    last_text_x = Some(x);
+                }
+            }
+
+            let (text_start, text_end) = match (first_text_x, last_text_x) {
+                (Some(s), Some(e)) => (s, e),
+                _ => continue,
+            };
+
+            let row_sel_start = if y == start.1 {
+                start.0.max(base_x)
+            } else {
+                base_x
+            };
+            let row_sel_end = if y == end.1 {
+                end.0.min(max_x)
+            } else {
+                max_x
+            };
+
+            if row_sel_start > row_sel_end {
+                continue;
+            }
+
+            let from_x = row_sel_start.max(text_start);
+            let to_x = row_sel_end.min(text_end);
+
+            if from_x > to_x {
+                continue;
+            }
+
+            for x in from_x..=to_x {
+                let cell = &mut buf[(x, y)];
+                let style = cell.style();
+                cell.set_style(style.add_modifier(Modifier::REVERSED));
+            }
+        }
     }
 
     fn handle_mouse_event(&mut self, tui: &mut tui::Tui, event: crossterm::event::MouseEvent) {
         if self.overlay.is_some() {
             return;
         }
+
+        let size = tui.terminal.last_known_screen_size;
+        let width = size.width;
+        let height = size.height;
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let chat_height = self.chat_widget.desired_height(width);
+        if chat_height >= height {
+            return;
+        }
+
+        let transcript_height = height.saturating_sub(chat_height);
+        if transcript_height == 0 {
+            return;
+        }
+
+        let transcript_area = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: transcript_height,
+        };
+
+        let base_x = transcript_area.x.saturating_add(2);
+        let max_x = transcript_area.right().saturating_sub(1);
+
+        let mut clamped_x = event.column;
+        let mut clamped_y = event.row;
+
+        if clamped_y < transcript_area.y || clamped_y >= transcript_area.bottom() {
+            clamped_y = transcript_area.y;
+        }
+        if clamped_x < base_x {
+            clamped_x = base_x;
+        }
+        if clamped_x > max_x {
+            clamped_x = max_x;
+        }
+
         match event.kind {
             crossterm::event::MouseEventKind::ScrollUp => {
+                self.transcript_selection = TranscriptSelection::default();
                 self.scroll_transcript(tui, -3);
             }
             crossterm::event::MouseEventKind::ScrollDown => {
+                self.transcript_selection = TranscriptSelection::default();
                 self.scroll_transcript(tui, 3);
+            }
+            crossterm::event::MouseEventKind::Down(MouseButton::Left) => {
+                self.transcript_selection.anchor = Some((clamped_x, clamped_y));
+                self.transcript_selection.head = Some((clamped_x, clamped_y));
+            }
+            crossterm::event::MouseEventKind::Drag(MouseButton::Left) => {
+                if self.transcript_selection.anchor.is_some() {
+                    self.transcript_selection.head = Some((clamped_x, clamped_y));
+                }
+            }
+            crossterm::event::MouseEventKind::Up(MouseButton::Left) => {
+                if self.transcript_selection.anchor == self.transcript_selection.head {
+                    self.transcript_selection = TranscriptSelection::default();
+                }
             }
             _ => {}
         }
@@ -1256,7 +1394,7 @@ fn build_transcript_lines(
     let mut has_emitted_lines = false;
 
     for (cell_index, cell) in cells.iter().enumerate() {
-        let mut cell_lines = cell.display_lines(width);
+        let cell_lines = cell.display_lines(width);
         if cell_lines.is_empty() {
             continue;
         }

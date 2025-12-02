@@ -274,7 +274,6 @@ impl Tui {
                             Event::FocusLost => {
                                 terminal_focused.store(false, Ordering::Relaxed);
                             }
-                            _ => {}
                         }
                     }
                     result = draw_rx.recv() => {
