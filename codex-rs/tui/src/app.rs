@@ -18,7 +18,6 @@ use crate::resume_picker::ResumeSelection;
 use crate::tui;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
-use crate::wrapping::word_wrap_lines_borrowed;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_protocol::AuthMode;
 use codex_common::model_presets::HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG;
@@ -210,6 +209,7 @@ pub(crate) struct App {
     pub(crate) file_search: FileSearchManager,
 
     pub(crate) transcript_cells: Vec<Arc<dyn HistoryCell>>,
+    transcript_scroll: TranscriptScroll,
 
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
@@ -233,6 +233,21 @@ pub(crate) struct App {
 
     // One-shot suppression of the next world-writable scan after user confirmation.
     skip_world_writable_scan_once: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TranscriptScroll {
+    ToBottom,
+    Scrolled {
+        cell_index: usize,
+        line_in_cell: usize,
+    },
+}
+
+impl Default for TranscriptScroll {
+    fn default() -> Self {
+        TranscriptScroll::ToBottom
+    }
 }
 
 impl App {
@@ -333,6 +348,7 @@ impl App {
             file_search,
             enhanced_keys_supported,
             transcript_cells: Vec::new(),
+            transcript_scroll: TranscriptScroll::ToBottom,
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
@@ -413,6 +429,9 @@ impl App {
                 TuiEvent::Key(key_event) => {
                     self.handle_key_event(tui, key_event).await;
                 }
+                TuiEvent::Mouse(_) => {
+                    // Mouse scroll for transcript not yet implemented.
+                }
                 TuiEvent::Paste(pasted) => {
                     // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
                     // but tui-textarea expects \n. Normalize CR to LF.
@@ -454,7 +473,7 @@ impl App {
         Ok(true)
     }
 
-    pub(crate) fn render_transcript_cells(
+pub(crate) fn render_transcript_cells(
         &self,
         frame: &mut Frame,
         cells: &[Arc<dyn HistoryCell>],
@@ -509,16 +528,11 @@ impl App {
             return;
         }
 
-        let wrapped = word_wrap_lines_borrowed(&lines, transcript_area.width.max(1) as usize);
-        if wrapped.is_empty() {
-            return;
-        }
+        Clear.render_ref(transcript_area, frame.buffer);
 
-        let total_lines = wrapped.len();
+        let total_lines = lines.len();
         let max_visible = transcript_area.height as usize;
         let start_index = total_lines.saturating_sub(max_visible);
-
-        Clear.render_ref(transcript_area, frame.buffer);
 
         for (row_index, line_index) in (start_index..total_lines).enumerate() {
             if row_index >= max_visible {
@@ -531,7 +545,7 @@ impl App {
                 width: transcript_area.width,
                 height: 1,
             };
-            wrapped[line_index].render_ref(row_area, frame.buffer);
+            lines[line_index].render_ref(row_area, frame.buffer);
         }
     }
 
@@ -1144,6 +1158,7 @@ mod tests {
             active_profile: None,
             file_search,
             transcript_cells: Vec::new(),
+            transcript_scroll: TranscriptScroll::ToBottom,
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
@@ -1181,6 +1196,7 @@ mod tests {
                 active_profile: None,
                 file_search,
                 transcript_cells: Vec::new(),
+                transcript_scroll: TranscriptScroll::ToBottom,
                 overlay: None,
                 deferred_history_lines: Vec::new(),
                 has_emitted_history_lines: false,

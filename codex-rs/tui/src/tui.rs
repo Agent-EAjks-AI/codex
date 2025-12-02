@@ -166,6 +166,7 @@ pub enum TuiEvent {
     Key(KeyEvent),
     Paste(String),
     Draw,
+    Mouse(crossterm::event::MouseEvent),
 }
 
 pub struct Tui {
@@ -261,6 +262,9 @@ impl Tui {
                             }
                             Event::Paste(pasted) => {
                                 yield TuiEvent::Paste(pasted);
+                            }
+                            Event::Mouse(mouse_event) => {
+                                yield TuiEvent::Mouse(mouse_event);
                             }
                             Event::FocusGained => {
                                 terminal_focused.store(true, Ordering::Relaxed);

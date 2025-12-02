@@ -495,6 +495,10 @@ async fn run_ratatui_app(
 
     let Cli { prompt, images, .. } = cli;
 
+    // Use alternate screen for the main interactive session so the viewport
+    // covers the full terminal and we don't leave gaps in scrollback.
+    let _ = tui.enter_alt_screen();
+
     let app_result = App::run(
         &mut tui,
         auth_manager,
@@ -507,6 +511,7 @@ async fn run_ratatui_app(
     )
     .await;
 
+    let _ = tui.leave_alt_screen();
     restore();
     // Mark the end of the recorded session.
     session_log::log_session_end();
