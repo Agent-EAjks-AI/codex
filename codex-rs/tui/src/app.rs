@@ -75,6 +75,7 @@ pub struct AppExitInfo {
     pub token_usage: TokenUsage,
     pub conversation_id: Option<ConversationId>,
     pub update_action: Option<UpdateAction>,
+    pub session_lines: Vec<String>,
 }
 
 fn session_summary(
@@ -193,6 +194,7 @@ async fn handle_model_migration_prompt_if_needed(
                     token_usage: TokenUsage::default(),
                     conversation_id: None,
                     update_action: None,
+                    session_lines: Vec::new(),
                 });
             }
         }
@@ -426,11 +428,28 @@ impl App {
                 app.handle_tui_event(tui, event).await?
             }
         } {}
+        let width = tui.terminal.last_known_screen_size.width;
+        let session_lines = if width == 0 {
+            Vec::new()
+        } else {
+            let (lines, _) = build_transcript_lines(&app.transcript_cells, width);
+            lines
+                .into_iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect()
+        };
+
         tui.terminal.clear()?;
         Ok(AppExitInfo {
             token_usage: app.token_usage(),
             conversation_id: app.chat_widget.conversation_id(),
             update_action: app.pending_update_action,
+            session_lines,
         })
     }
 
