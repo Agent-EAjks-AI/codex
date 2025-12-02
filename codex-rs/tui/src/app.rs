@@ -3,6 +3,7 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::chatwidget::ChatWidget;
+use crate::clipboard_copy;
 use crate::custom_terminal::Frame;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
@@ -1363,6 +1364,14 @@ impl App {
                     self.chat_widget.handle_key_event(key_event);
                 }
             }
+            KeyEvent {
+                code: KeyCode::Char('y'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            } => {
+                self.copy_transcript_selection(tui);
+            }
             // Enter confirms backtrack when primed + count > 0. Otherwise pass to widget.
             KeyEvent {
                 code: KeyCode::Enter,
@@ -1454,6 +1463,165 @@ impl App {
                 // Ignore Release key events.
             }
         };
+    }
+
+    fn copy_transcript_selection(&mut self, tui: &tui::Tui) {
+        let (anchor, head) = match (
+            self.transcript_selection.anchor,
+            self.transcript_selection.head,
+        ) {
+            (Some(a), Some(h)) if a != h => (a, h),
+            _ => return,
+        };
+
+        let size = tui.terminal.last_known_screen_size;
+        let width = size.width;
+        let height = size.height;
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let chat_height = self.chat_widget.desired_height(width);
+        if chat_height >= height {
+            return;
+        }
+
+        let transcript_height = height.saturating_sub(chat_height);
+        if transcript_height == 0 {
+            return;
+        }
+
+        let mut buf = Buffer::empty(Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: transcript_height,
+        });
+
+        let transcript_area = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: transcript_height,
+        };
+
+        let cells = self.transcript_cells.clone();
+        let (lines, _) = build_transcript_lines(&cells, transcript_area.width);
+        let total_lines = lines.len();
+        if total_lines == 0 {
+            return;
+        }
+
+        let max_visible = transcript_area.height as usize;
+        let max_start = total_lines.saturating_sub(max_visible);
+        let top_offset = self.transcript_view_top.min(max_start);
+
+        Clear.render_ref(transcript_area, &mut buf);
+
+        for (row_index, line_index) in (top_offset..total_lines).enumerate() {
+            if row_index >= max_visible {
+                break;
+            }
+            let row_area = Rect {
+                x: transcript_area.x,
+                y: transcript_area.y + row_index as u16,
+                width: transcript_area.width,
+                height: 1,
+            };
+            lines[line_index].render_ref(row_area, &mut buf);
+        }
+
+        let base_x = transcript_area.x.saturating_add(2);
+        let max_x = transcript_area.right().saturating_sub(1);
+
+        let mut start = anchor;
+        let mut end = head;
+        if (end.0 < start.0) || (end.0 == start.0 && end.1 < start.1) {
+            std::mem::swap(&mut start, &mut end);
+        }
+        let (start_line, start_col) = start;
+        let (end_line, end_col) = end;
+
+        let mut lines_out: Vec<String> = Vec::new();
+
+        for row in 0..transcript_area.height {
+            let y = transcript_area.y + row;
+            let row_index = usize::from(row);
+            let line_index = top_offset.saturating_add(row_index);
+
+            if line_index < start_line || line_index > end_line {
+                continue;
+            }
+
+            let row_sel_start = if line_index == start_line {
+                start_col.max(base_x)
+            } else {
+                base_x
+            };
+            let row_sel_end = if line_index == end_line {
+                end_col.min(max_x)
+            } else {
+                max_x
+            };
+
+            if row_sel_start > row_sel_end {
+                continue;
+            }
+
+            let mut first_text_x = None;
+            let mut last_text_x = None;
+            for x in base_x..=max_x {
+                let cell = &buf[(x, y)];
+                if cell.symbol() != " " {
+                    if first_text_x.is_none() {
+                        first_text_x = Some(x);
+                    }
+                    last_text_x = Some(x);
+                }
+            }
+
+            let (text_start, text_end) = match (first_text_x, last_text_x) {
+                (Some(s), Some(e)) => (s, e),
+                _ => {
+                    // Line has no visible text but lies within the selected range.
+                    // Preserve it as an empty line in the copied text.
+                    lines_out.push(String::new());
+                    continue;
+                }
+            };
+
+            let from_x = row_sel_start.max(text_start);
+            let to_x = row_sel_end.min(text_end);
+            if from_x > to_x {
+                continue;
+            }
+
+            let mut line_text = String::new();
+            for x in from_x..=to_x {
+                let cell = &buf[(x, y)];
+                let symbol = cell.symbol();
+                if !symbol.is_empty() {
+                    line_text.push_str(symbol);
+                }
+            }
+
+            lines_out.push(line_text);
+        }
+
+        if lines_out.is_empty() {
+            return;
+        }
+
+        let text = lines_out.join("\n");
+        match clipboard_copy::copy_text(text) {
+            Ok(()) => {
+                self.chat_widget.mark_copy_success();
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to copy selection to clipboard");
+                self.chat_widget.mark_copy_failure();
+            }
+        }
     }
 
     #[cfg(target_os = "windows")]

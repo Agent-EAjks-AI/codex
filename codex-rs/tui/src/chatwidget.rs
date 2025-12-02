@@ -79,6 +79,7 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
+use crate::bottom_pane::CopyStatus;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
@@ -363,6 +364,14 @@ impl ChatWidget {
     fn set_status_header(&mut self, header: String) {
         self.current_status_header = header.clone();
         self.bottom_pane.update_status_header(header);
+    }
+
+    pub(crate) fn mark_copy_success(&mut self) {
+        self.bottom_pane.set_copy_status(Some(CopyStatus::Copied));
+    }
+
+    pub(crate) fn mark_copy_failure(&mut self) {
+        self.bottom_pane.set_copy_status(Some(CopyStatus::Failed));
     }
 
     // --- Small event handlers ---

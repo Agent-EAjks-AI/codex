@@ -48,6 +48,7 @@ pub(crate) enum CancellationEvent {
 pub(crate) use chat_composer::ChatComposer;
 pub(crate) use chat_composer::InputResult;
 use codex_protocol::custom_prompts::CustomPrompt;
+pub(crate) use footer::CopyStatus;
 
 use crate::status_indicator_widget::StatusIndicatorWidget;
 pub(crate) use list_selection_view::SelectionAction;
@@ -374,6 +375,11 @@ impl BottomPane {
     ) {
         self.composer
             .set_transcript_ui_state(scrolled, selection_active, scroll_position);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_copy_status(&mut self, status: Option<CopyStatus>) {
+        self.composer.set_copy_status(status);
         self.request_redraw();
     }
 

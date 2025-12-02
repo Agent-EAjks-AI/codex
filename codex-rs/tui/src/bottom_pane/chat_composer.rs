@@ -20,6 +20,7 @@ use super::chat_composer_history::ChatComposerHistory;
 use super::command_popup::CommandItem;
 use super::command_popup::CommandPopup;
 use super::file_search_popup::FileSearchPopup;
+use super::footer::CopyStatus;
 use super::footer::FooterMode;
 use super::footer::FooterProps;
 use super::footer::esc_hint_mode;
@@ -116,6 +117,7 @@ pub(crate) struct ChatComposer {
     transcript_scrolled: bool,
     transcript_selection_active: bool,
     transcript_scroll_position: Option<(usize, usize)>,
+    copy_status: Option<CopyStatus>,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -162,6 +164,7 @@ impl ChatComposer {
             transcript_scrolled: false,
             transcript_selection_active: false,
             transcript_scroll_position: None,
+            copy_status: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -1396,6 +1399,7 @@ impl ChatComposer {
             transcript_scrolled: self.transcript_scrolled,
             transcript_selection_active: self.transcript_selection_active,
             transcript_scroll_position: self.transcript_scroll_position,
+            copy_status: self.copy_status,
         }
     }
 
@@ -1535,6 +1539,13 @@ impl ChatComposer {
         self.transcript_scrolled = scrolled;
         self.transcript_selection_active = selection_active;
         self.transcript_scroll_position = scroll_position;
+        if !selection_active {
+            self.copy_status = None;
+        }
+    }
+
+    pub(crate) fn set_copy_status(&mut self, status: Option<CopyStatus>) {
+        self.copy_status = status;
     }
 
     pub(crate) fn set_context_window_percent(&mut self, percent: Option<i64>) {

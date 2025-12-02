@@ -12,6 +12,12 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
 #[derive(Clone, Copy, Debug)]
+pub(crate) enum CopyStatus {
+    Copied,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct FooterProps {
     pub(crate) mode: FooterMode,
     pub(crate) esc_backtrack_hint: bool,
@@ -21,6 +27,7 @@ pub(crate) struct FooterProps {
     pub(crate) transcript_scrolled: bool,
     pub(crate) transcript_selection_active: bool,
     pub(crate) transcript_scroll_position: Option<(usize, usize)>,
+    pub(crate) copy_status: Option<CopyStatus>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,6 +116,13 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
                 line.push_span(" · ".dim());
                 line.push_span(key_hint::ctrl(KeyCode::Char('y')));
                 line.push_span(" copy selection".dim());
+            }
+            if let Some(status) = props.copy_status {
+                line.push_span(" · ".dim());
+                match status {
+                    CopyStatus::Copied => line.push_span("selection copied".dim()),
+                    CopyStatus::Failed => line.push_span("copy failed".dim()),
+                }
             }
             vec![line]
         }
@@ -426,6 +440,7 @@ mod tests {
                 transcript_scrolled: false,
                 transcript_selection_active: false,
                 transcript_scroll_position: None,
+                copy_status: None,
             },
         );
 
@@ -440,6 +455,7 @@ mod tests {
                 transcript_scrolled: false,
                 transcript_selection_active: false,
                 transcript_scroll_position: None,
+                copy_status: None,
             },
         );
 
@@ -454,6 +470,7 @@ mod tests {
                 transcript_scrolled: false,
                 transcript_selection_active: false,
                 transcript_scroll_position: None,
+                copy_status: None,
             },
         );
 
@@ -468,6 +485,7 @@ mod tests {
                 transcript_scrolled: false,
                 transcript_selection_active: false,
                 transcript_scroll_position: None,
+                copy_status: None,
             },
         );
 
@@ -482,6 +500,7 @@ mod tests {
                 transcript_scrolled: false,
                 transcript_selection_active: false,
                 transcript_scroll_position: None,
+                copy_status: None,
             },
         );
 
@@ -496,6 +515,7 @@ mod tests {
                 transcript_scrolled: false,
                 transcript_selection_active: false,
                 transcript_scroll_position: None,
+                copy_status: None,
             },
         );
 
@@ -510,6 +530,7 @@ mod tests {
                 transcript_scrolled: false,
                 transcript_selection_active: false,
                 transcript_scroll_position: None,
+                copy_status: None,
             },
         );
     }
