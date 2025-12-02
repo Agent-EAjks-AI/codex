@@ -8,6 +8,7 @@ use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::UserHistoryCell;
 use crate::model_migration::ModelMigrationOutcome;
 use crate::model_migration::migration_copy_for_config;
 use crate::model_migration::run_model_migration_prompt;
@@ -44,10 +45,10 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::MouseButton;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::style::Stylize;
-use ratatui::buffer::Buffer;
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
@@ -214,6 +215,7 @@ pub(crate) struct App {
     pub(crate) transcript_cells: Vec<Arc<dyn HistoryCell>>,
     transcript_scroll: TranscriptScroll,
     transcript_selection: TranscriptSelection,
+    transcript_view_top: usize,
 
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
@@ -256,8 +258,8 @@ impl Default for TranscriptScroll {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct TranscriptSelection {
-    anchor: Option<(u16, u16)>,
-    head: Option<(u16, u16)>,
+    anchor: Option<(usize, u16)>,
+    head: Option<(usize, u16)>,
 }
 
 impl App {
@@ -360,6 +362,7 @@ impl App {
             transcript_cells: Vec::new(),
             transcript_scroll: TranscriptScroll::ToBottom,
             transcript_selection: TranscriptSelection::default(),
+            transcript_view_top: 0,
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
@@ -452,6 +455,15 @@ impl App {
                     self.chat_widget.handle_paste(pasted);
                 }
                 TuiEvent::Draw => {
+                    let transcript_scrolled =
+                        !matches!(self.transcript_scroll, TranscriptScroll::ToBottom);
+                    let selection_active = matches!(
+                        (self.transcript_selection.anchor, self.transcript_selection.head),
+                        (Some(a), Some(b)) if a != b
+                    );
+                    self.chat_widget
+                        .set_transcript_ui_state(transcript_scrolled, selection_active);
+
                     self.chat_widget.maybe_post_pending_notification(tui);
                     if self
                         .chat_widget
@@ -516,6 +528,7 @@ impl App {
                 frame.buffer,
             );
             self.transcript_scroll = TranscriptScroll::ToBottom;
+            self.transcript_view_top = 0;
             return;
         }
 
@@ -527,6 +540,11 @@ impl App {
         };
 
         let (lines, meta) = build_transcript_lines(cells, transcript_area.width);
+
+        let is_user_cell: Vec<bool> = cells
+            .iter()
+            .map(|c| c.as_any().is::<UserHistoryCell>())
+            .collect();
 
         if lines.is_empty() {
             Clear.render_ref(transcript_area, frame.buffer);
@@ -561,6 +579,7 @@ impl App {
                 }
             }
         };
+        self.transcript_view_top = top_offset;
 
         Clear.render_ref(transcript_area, frame.buffer);
 
@@ -575,6 +594,16 @@ impl App {
                 width: transcript_area.width,
                 height: 1,
             };
+            if let Some((cell_index, _)) = meta[line_index] {
+                if is_user_cell.get(cell_index).copied().unwrap_or(false) {
+                    let base_style = crate::style::user_message_style();
+                    for x in row_area.x..row_area.right() {
+                        let cell = &mut frame.buffer[(x, y)];
+                        let style = cell.style().patch(base_style);
+                        cell.set_style(style);
+                    }
+                }
+            }
             lines[line_index].render_ref(row_area, frame.buffer);
         }
 
@@ -582,23 +611,30 @@ impl App {
     }
 
     fn apply_transcript_selection(&self, area: Rect, buf: &mut Buffer) {
-        let (anchor, head) = match (self.transcript_selection.anchor, self.transcript_selection.head)
-        {
+        let (anchor, head) = match (
+            self.transcript_selection.anchor,
+            self.transcript_selection.head,
+        ) {
             (Some(a), Some(h)) => (a, h),
             _ => return,
         };
 
-        let mut start = anchor;
-        let mut end = head;
-        if (end.1 < start.1) || (end.1 == start.1 && end.0 < start.0) {
-            std::mem::swap(&mut start, &mut end);
+        let (mut start_line, mut start_col) = anchor;
+        let (mut end_line, mut end_col) = head;
+        if (end_line < start_line) || (end_line == start_line && end_col < start_col) {
+            std::mem::swap(&mut start_line, &mut end_line);
+            std::mem::swap(&mut start_col, &mut end_col);
         }
 
         let base_x = area.x.saturating_add(2);
         let max_x = area.right().saturating_sub(1);
+        let top_offset = self.transcript_view_top;
 
         for y in area.y..area.bottom() {
-            if y < start.1 || y > end.1 {
+            let row_index = usize::from(y.saturating_sub(area.y));
+            let line_index = top_offset.saturating_add(row_index);
+
+            if line_index < start_line || line_index > end_line {
                 continue;
             }
 
@@ -619,13 +655,13 @@ impl App {
                 _ => continue,
             };
 
-            let row_sel_start = if y == start.1 {
-                start.0.max(base_x)
+            let row_sel_start = if line_index == start_line {
+                start_col.max(base_x)
             } else {
                 base_x
             };
-            let row_sel_end = if y == end.1 {
-                end.0.min(max_x)
+            let row_sel_end = if line_index == end_line {
+                end_col.min(max_x)
             } else {
                 max_x
             };
@@ -694,22 +730,28 @@ impl App {
             clamped_x = max_x;
         }
 
+        let streaming = self.chat_widget.is_task_running()
+            && matches!(self.transcript_scroll, TranscriptScroll::ToBottom);
+
+        let row_index = usize::from(clamped_y.saturating_sub(transcript_area.y));
+        let line_index = self.transcript_view_top.saturating_add(row_index);
+
         match event.kind {
             crossterm::event::MouseEventKind::ScrollUp => {
-                self.transcript_selection = TranscriptSelection::default();
                 self.scroll_transcript(tui, -3);
             }
             crossterm::event::MouseEventKind::ScrollDown => {
-                self.transcript_selection = TranscriptSelection::default();
                 self.scroll_transcript(tui, 3);
             }
             crossterm::event::MouseEventKind::Down(MouseButton::Left) => {
-                self.transcript_selection.anchor = Some((clamped_x, clamped_y));
-                self.transcript_selection.head = Some((clamped_x, clamped_y));
+                if !streaming {
+                    self.transcript_selection.anchor = Some((line_index, clamped_x));
+                    self.transcript_selection.head = Some((line_index, clamped_x));
+                }
             }
             crossterm::event::MouseEventKind::Drag(MouseButton::Left) => {
-                if self.transcript_selection.anchor.is_some() {
-                    self.transcript_selection.head = Some((clamped_x, clamped_y));
+                if !streaming && self.transcript_selection.anchor.is_some() {
+                    self.transcript_selection.head = Some((line_index, clamped_x));
                 }
             }
             crossterm::event::MouseEventKind::Up(MouseButton::Left) => {
@@ -783,7 +825,9 @@ impl App {
         let new_top = if delta_lines < 0 {
             current_top.saturating_sub(delta_lines.unsigned_abs() as usize)
         } else {
-            current_top.saturating_add(delta_lines as usize).min(max_start)
+            current_top
+                .saturating_add(delta_lines as usize)
+                .min(max_start)
         };
 
         if new_top == max_start {
@@ -801,9 +845,7 @@ impl App {
                     cell_index,
                     line_in_cell,
                 };
-            } else if let Some(prev_idx) =
-                (0..=new_top).rfind(|&idx| meta[idx].is_some())
-            {
+            } else if let Some(prev_idx) = (0..=new_top).rfind(|&idx| meta[idx].is_some()) {
                 if let Some((cell_index, line_in_cell)) = meta[prev_idx] {
                     self.transcript_scroll = TranscriptScroll::Scrolled {
                         cell_index,
@@ -1462,6 +1504,8 @@ mod tests {
             file_search,
             transcript_cells: Vec::new(),
             transcript_scroll: TranscriptScroll::ToBottom,
+            transcript_selection: TranscriptSelection::default(),
+            transcript_view_top: 0,
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
@@ -1500,6 +1544,8 @@ mod tests {
                 file_search,
                 transcript_cells: Vec::new(),
                 transcript_scroll: TranscriptScroll::ToBottom,
+                transcript_selection: TranscriptSelection::default(),
+                transcript_view_top: 0,
                 overlay: None,
                 deferred_history_lines: Vec::new(),
                 has_emitted_history_lines: false,

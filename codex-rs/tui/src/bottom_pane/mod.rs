@@ -366,6 +366,12 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_transcript_ui_state(&mut self, scrolled: bool, selection_active: bool) {
+        self.composer
+            .set_transcript_ui_state(scrolled, selection_active);
+        self.request_redraw();
+    }
+
     /// Update custom prompts available for the slash popup.
     pub(crate) fn set_custom_prompts(&mut self, prompts: Vec<CustomPrompt>) {
         self.composer.set_custom_prompts(prompts);

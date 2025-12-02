@@ -113,6 +113,8 @@ pub(crate) struct ChatComposer {
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<i64>,
+    transcript_scrolled: bool,
+    transcript_selection_active: bool,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -156,6 +158,8 @@ impl ChatComposer {
             footer_mode: FooterMode::ShortcutSummary,
             footer_hint_override: None,
             context_window_percent: None,
+            transcript_scrolled: false,
+            transcript_selection_active: false,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -1387,6 +1391,8 @@ impl ChatComposer {
             use_shift_enter_hint: self.use_shift_enter_hint,
             is_task_running: self.is_task_running,
             context_window_percent: self.context_window_percent,
+            transcript_scrolled: self.transcript_scrolled,
+            transcript_selection_active: self.transcript_selection_active,
         }
     }
 
@@ -1515,6 +1521,11 @@ impl ChatComposer {
 
     pub fn set_task_running(&mut self, running: bool) {
         self.is_task_running = running;
+    }
+
+    pub(crate) fn set_transcript_ui_state(&mut self, scrolled: bool, selection_active: bool) {
+        self.transcript_scrolled = scrolled;
+        self.transcript_selection_active = selection_active;
     }
 
     pub(crate) fn set_context_window_percent(&mut self, percent: Option<i64>) {

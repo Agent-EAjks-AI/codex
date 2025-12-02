@@ -2845,6 +2845,15 @@ impl ChatWidget {
     pub(crate) fn clear_esc_backtrack_hint(&mut self) {
         self.bottom_pane.clear_esc_backtrack_hint();
     }
+
+    pub(crate) fn is_task_running(&self) -> bool {
+        self.bottom_pane.is_task_running()
+    }
+
+    pub(crate) fn set_transcript_ui_state(&mut self, scrolled: bool, selection_active: bool) {
+        self.bottom_pane
+            .set_transcript_ui_state(scrolled, selection_active);
+    }
     /// Forward an `Op` directly to codex.
     pub(crate) fn submit_op(&self, op: Op) {
         // Record outbound operation for session replay fidelity.
