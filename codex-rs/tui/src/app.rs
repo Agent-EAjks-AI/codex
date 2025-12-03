@@ -218,6 +218,7 @@ pub(crate) struct App {
     pub(crate) transcript_cells: Vec<Arc<dyn HistoryCell>>,
     transcript_scroll: TranscriptScroll,
     transcript_selection: TranscriptSelection,
+    printed_history_cells: usize,
     transcript_view_top: usize,
     transcript_total_lines: usize,
 
@@ -366,6 +367,7 @@ impl App {
             transcript_cells: Vec::new(),
             transcript_scroll: TranscriptScroll::ToBottom,
             transcript_selection: TranscriptSelection::default(),
+            printed_history_cells: 0,
             transcript_view_top: 0,
             transcript_total_lines: 0,
             overlay: None,
@@ -432,13 +434,13 @@ impl App {
         let session_lines = if width == 0 {
             Vec::new()
         } else {
-            let (lines, meta) = build_transcript_lines(&app.transcript_cells, width);
-            let is_user_cell: Vec<bool> = app
-                .transcript_cells
-                .iter()
-                .map(|c| c.as_any().is::<UserHistoryCell>())
-                .collect();
-            render_lines_to_ansi(&lines, &meta, &is_user_cell, width)
+            let start = app.printed_history_cells.min(app.transcript_cells.len());
+            let cells = &app.transcript_cells[start..];
+            if cells.is_empty() {
+                Vec::new()
+            } else {
+                render_cells_to_ansi(cells, width)
+            }
         };
 
         tui.terminal.clear()?;
@@ -450,6 +452,32 @@ impl App {
         })
     }
 
+    pub(crate) fn handle_suspend(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        self.prepare_suspend_history(tui)?;
+        tui.suspend()?;
+        tui.frame_requester().schedule_frame();
+        Ok(())
+    }
+
+    fn prepare_suspend_history(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        let width = tui.terminal.last_known_screen_size.width;
+        if width == 0 {
+            return Ok(());
+        }
+        let start = self.printed_history_cells.min(self.transcript_cells.len());
+        let cells = &self.transcript_cells[start..];
+        if cells.is_empty() {
+            return Ok(());
+        }
+        let new_lines = render_cells_to_ansi(cells, width);
+        if new_lines.is_empty() {
+            return Ok(());
+        }
+        self.printed_history_cells = self.transcript_cells.len();
+        tui.set_suspend_history_lines(new_lines);
+        Ok(())
+    }
+
     pub(crate) async fn handle_tui_event(
         &mut self,
         tui: &mut tui::Tui,
@@ -457,73 +485,78 @@ impl App {
     ) -> Result<bool> {
         if self.overlay.is_some() {
             let _ = self.handle_backtrack_overlay_event(tui, event).await?;
-        } else {
-            match event {
-                TuiEvent::Key(key_event) => {
-                    self.handle_key_event(tui, key_event).await;
-                }
-                TuiEvent::Mouse(mouse_event) => {
-                    self.handle_mouse_event(tui, mouse_event);
-                }
-                TuiEvent::Paste(pasted) => {
-                    // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
-                    // but tui-textarea expects \n. Normalize CR to LF.
-                    // [tui-textarea]: https://github.com/rhysd/tui-textarea/blob/4d18622eeac13b309e0ff6a55a46ac6706da68cf/src/textarea.rs#L782-L783
-                    // [iTerm2]: https://github.com/gnachman/iTerm2/blob/5d0c0d9f68523cbd0494dad5422998964a2ecd8d/sources/iTermPasteHelper.m#L206-L216
-                    let pasted = pasted.replace("\r", "\n");
-                    self.chat_widget.handle_paste(pasted);
-                }
-                TuiEvent::Draw => {
-                    self.chat_widget.maybe_post_pending_notification(tui);
-                    if self
-                        .chat_widget
-                        .handle_paste_burst_tick(tui.frame_requester())
-                    {
-                        return Ok(true);
-                    }
-                    let cells = self.transcript_cells.clone();
-                    tui.draw(
-                        //self.chat_widget.desired_height(tui.terminal.size()?.width),
-                        tui.terminal.size()?.height,
-                        |frame| {
-                            let chat_height = self.chat_widget.desired_height(frame.area().width);
-                            // peg chat to the bottom
-                            let chat_area = Rect {
-                                x: frame.area().x,
-                                y: frame.area().bottom().saturating_sub(chat_height),
-                                width: frame.area().width,
-                                height: chat_height,
-                            };
-                            self.chat_widget.render(chat_area, frame.buffer);
-                            if let Some((x, y)) = self.chat_widget.cursor_pos(chat_area) {
-                                frame.set_cursor_position((x, y));
-                            }
-                            self.render_transcript_cells(frame, &cells);
+            return Ok(true);
+        }
 
-                            let transcript_scrolled =
-                                !matches!(self.transcript_scroll, TranscriptScroll::ToBottom);
-                            let selection_active = matches!(
-                                (self.transcript_selection.anchor, self.transcript_selection.head),
-                                (Some(a), Some(b)) if a != b
-                            );
-                            let scroll_position = if self.transcript_total_lines == 0 {
-                                None
-                            } else {
-                                Some((
-                                    self.transcript_view_top.saturating_add(1),
-                                    self.transcript_total_lines,
-                                ))
-                            };
-                            self.chat_widget.set_transcript_ui_state(
-                                transcript_scrolled,
-                                selection_active,
-                                scroll_position,
-                            );
-                        },
-                    )?;
+        match event {
+            TuiEvent::Suspend => {
+                self.handle_suspend(tui)?;
+            }
+            TuiEvent::Key(key_event) => {
+                self.handle_key_event(tui, key_event).await;
+            }
+            TuiEvent::Mouse(mouse_event) => {
+                self.handle_mouse_event(tui, mouse_event);
+            }
+            TuiEvent::Paste(pasted) => {
+                // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
+                // but tui-textarea expects \n. Normalize CR to LF.
+                // [tui-textarea]: https://github.com/rhysd/tui-textarea/blob/4d18622eeac13b309e0ff6a55a46ac6706da68cf/src/textarea.rs#L782-L783
+                // [iTerm2]: https://github.com/gnachman/iTerm2/blob/5d0c0d9f68523cbd0494dad5422998964a2ecd8d/sources/iTermPasteHelper.m#L206-L216
+                let pasted = pasted.replace("\r", "\n");
+                self.chat_widget.handle_paste(pasted);
+            }
+            TuiEvent::Draw => {
+                self.chat_widget.maybe_post_pending_notification(tui);
+                if self
+                    .chat_widget
+                    .handle_paste_burst_tick(tui.frame_requester())
+                {
+                    return Ok(true);
                 }
+                let cells = self.transcript_cells.clone();
+                tui.draw(
+                    //self.chat_widget.desired_height(tui.terminal.size()?.width),
+                    tui.terminal.size()?.height,
+                    |frame| {
+                        let chat_height = self.chat_widget.desired_height(frame.area().width);
+                        // peg chat to the bottom
+                        let chat_area = Rect {
+                            x: frame.area().x,
+                            y: frame.area().bottom().saturating_sub(chat_height),
+                            width: frame.area().width,
+                            height: chat_height,
+                        };
+                        self.chat_widget.render(chat_area, frame.buffer);
+                        if let Some((x, y)) = self.chat_widget.cursor_pos(chat_area) {
+                            frame.set_cursor_position((x, y));
+                        }
+                        self.render_transcript_cells(frame, &cells);
+
+                        let transcript_scrolled =
+                            !matches!(self.transcript_scroll, TranscriptScroll::ToBottom);
+                        let selection_active = matches!(
+                            (self.transcript_selection.anchor, self.transcript_selection.head),
+                            (Some(a), Some(b)) if a != b
+                        );
+                        let scroll_position = if self.transcript_total_lines == 0 {
+                            None
+                        } else {
+                            Some((
+                                self.transcript_view_top.saturating_add(1),
+                                self.transcript_total_lines,
+                            ))
+                        };
+                        self.chat_widget.set_transcript_ui_state(
+                            transcript_scrolled,
+                            selection_active,
+                            scroll_position,
+                        );
+                    },
+                )?;
             }
         }
+
         Ok(true)
     }
 
@@ -1723,6 +1756,18 @@ fn build_transcript_lines(
     (lines, meta)
 }
 
+fn render_cells_to_ansi(cells: &[Arc<dyn HistoryCell>], width: u16) -> Vec<String> {
+    let (lines, meta) = build_transcript_lines(cells, width);
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let is_user_cell: Vec<bool> = cells
+        .iter()
+        .map(|c| c.as_any().is::<UserHistoryCell>())
+        .collect();
+    render_lines_to_ansi(&lines, &meta, &is_user_cell, width)
+}
+
 fn render_lines_to_ansi(
     lines: &[Line<'static>],
     meta: &[Option<(usize, usize)>],
@@ -1817,6 +1862,7 @@ mod tests {
             transcript_cells: Vec::new(),
             transcript_scroll: TranscriptScroll::ToBottom,
             transcript_selection: TranscriptSelection::default(),
+            printed_history_cells: 0,
             transcript_view_top: 0,
             transcript_total_lines: 0,
             overlay: None,
@@ -1858,6 +1904,7 @@ mod tests {
                 transcript_cells: Vec::new(),
                 transcript_scroll: TranscriptScroll::ToBottom,
                 transcript_selection: TranscriptSelection::default(),
+                printed_history_cells: 0,
                 transcript_view_top: 0,
                 transcript_total_lines: 0,
                 overlay: None,

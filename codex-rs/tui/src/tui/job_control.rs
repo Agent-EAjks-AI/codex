@@ -45,6 +45,8 @@ pub struct SuspendContext {
     resume_pending: Arc<Mutex<Option<ResumeAction>>>,
     /// Inline viewport cursor row used to place the cursor before yielding during suspend.
     suspend_cursor_y: Arc<AtomicU16>,
+    /// Session lines to print to stdout when suspending, if any.
+    history_lines: Arc<Mutex<Vec<String>>>,
 }
 
 impl SuspendContext {
@@ -52,6 +54,7 @@ impl SuspendContext {
         Self {
             resume_pending: Arc::new(Mutex::new(None)),
             suspend_cursor_y: Arc::new(AtomicU16::new(0)),
+            history_lines: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -72,7 +75,22 @@ impl SuspendContext {
         }
         let y = self.suspend_cursor_y.load(Ordering::Relaxed);
         let _ = execute!(stdout(), MoveTo(0, y), Show);
-        suspend_process()
+        super::restore()?;
+
+        let lines = self.take_suspend_history_lines();
+        if !lines.is_empty() {
+            use std::io::Write as _;
+            let mut out = stdout();
+            for line in lines {
+                let _ = writeln!(out, "{line}");
+            }
+            let _ = out.flush();
+        }
+
+        unsafe { libc::kill(0, libc::SIGTSTP) };
+        // After the process resumes, reapply terminal modes so drawing can continue.
+        super::set_modes()?;
+        Ok(())
     }
 
     /// Consume the pending resume intent and precompute any viewport changes needed post-resume.
@@ -112,6 +130,14 @@ impl SuspendContext {
         self.suspend_cursor_y.store(value, Ordering::Relaxed);
     }
 
+    /// Set the session lines that should be printed when suspending.
+    pub(crate) fn set_suspend_history_lines(&self, lines: Vec<String>) {
+        *self
+            .history_lines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = lines;
+    }
+
     /// Record a pending resume action to apply after SIGTSTP returns control.
     fn set_resume_action(&self, value: ResumeAction) {
         *self
@@ -126,6 +152,15 @@ impl SuspendContext {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
+    }
+
+    /// Take and clear any pending history lines to print on suspend.
+    fn take_suspend_history_lines(&self) -> Vec<String> {
+        self.history_lines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+            .collect()
     }
 }
 
@@ -171,13 +206,4 @@ impl PreparedResumeAction {
         }
         Ok(())
     }
-}
-
-/// Deliver SIGTSTP after restoring terminal state, then re-applies terminal modes once resumed.
-fn suspend_process() -> Result<()> {
-    super::restore()?;
-    unsafe { libc::kill(0, libc::SIGTSTP) };
-    // After the process resumes, reapply terminal modes so drawing can continue.
-    super::set_modes()?;
-    Ok(())
 }

@@ -167,6 +167,7 @@ pub enum TuiEvent {
     Paste(String),
     Draw,
     Mouse(crossterm::event::MouseEvent),
+    Suspend,
 }
 
 pub struct Tui {
@@ -235,12 +236,6 @@ impl Tui {
         let mut crossterm_events = crossterm::event::EventStream::new();
         let mut draw_rx = self.draw_tx.subscribe();
 
-        // State for tracking how we should resume from ^Z suspend.
-        #[cfg(unix)]
-        let suspend_context = self.suspend_context.clone();
-        #[cfg(unix)]
-        let alt_screen_active = self.alt_screen_active.clone();
-
         let terminal_focused = self.terminal_focused.clone();
         let event_stream = async_stream::stream! {
             loop {
@@ -250,9 +245,7 @@ impl Tui {
                             Event::Key(key_event) => {
                                 #[cfg(unix)]
                                 if SUSPEND_KEY.is_press(key_event) {
-                                    let _ = suspend_context.suspend(&alt_screen_active);
-                                    // We continue here after resume.
-                                    yield TuiEvent::Draw;
+                                    yield TuiEvent::Suspend;
                                     continue;
                                 }
                                 yield TuiEvent::Key(key_event);
@@ -294,6 +287,26 @@ impl Tui {
             }
         };
         Box::pin(event_stream)
+    }
+
+    pub fn set_suspend_history_lines(&mut self, lines: Vec<String>) {
+        #[cfg(unix)]
+        {
+            self.suspend_context.set_suspend_history_lines(lines);
+        }
+        #[cfg(not(unix))]
+        let _ = lines;
+    }
+
+    pub fn suspend(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            return self.suspend_context.suspend(&self.alt_screen_active);
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
     }
 
     /// Enter alternate screen and expand the viewport to full terminal size, saving the current
