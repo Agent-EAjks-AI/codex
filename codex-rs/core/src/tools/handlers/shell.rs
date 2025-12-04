@@ -317,8 +317,8 @@ mod tests {
     }
 
     fn powershell_path() -> Option<PathBuf> {
-        if cfg!(windows) {
-            if let Some(home) = Command::new("cmd")
+        if cfg!(windows)
+            && let Some(home) = Command::new("cmd")
                 .args(["/C", "pwsh", "-NoProfile", "-Command", "$PSHOME"])
                 .output()
                 .ok()
@@ -334,9 +334,8 @@ mod tests {
                         Some(PathBuf::from(trimmed).join("pwsh.exe"))
                     }
                 })
-            {
-                return Some(home);
-            }
+        {
+            return Some(home);
         }
 
         const CANDIDATES: &[&str] = &["pwsh", "pwsh.exe", "powershell", "powershell.exe"];

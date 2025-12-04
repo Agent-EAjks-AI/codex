@@ -415,47 +415,47 @@ mod tests {
             return;
         };
 
-        assert!(is_safe_command_windows(&vec![
+        assert!(is_safe_command_windows(&[
             pwsh.clone(),
             "-NoLogo".to_string(),
             "-NoProfile".to_string(),
             "-Command".to_string(),
             "rg --files-with-matches foo | Measure-Object | Select-Object -ExpandProperty Count"
-                .to_string(),
+                .to_string()
         ]));
 
-        assert!(is_safe_command_windows(&vec![
+        assert!(is_safe_command_windows(&[
             pwsh.clone(),
             "-NoLogo".to_string(),
             "-NoProfile".to_string(),
             "-Command".to_string(),
-            "Get-Content foo.rs | Select-Object -Skip 200".to_string(),
+            "Get-Content foo.rs | Select-Object -Skip 200".to_string()
         ]));
 
-        assert!(is_safe_command_windows(&vec![
+        assert!(is_safe_command_windows(&[
             pwsh.clone(),
             "-NoLogo".to_string(),
             "-NoProfile".to_string(),
             "-Command".to_string(),
-            "git -c core.pager=cat show HEAD:foo.rs".to_string(),
+            "git -c core.pager=cat show HEAD:foo.rs".to_string()
         ]));
 
-        assert!(is_safe_command_windows(&vec![
+        assert!(is_safe_command_windows(&[
             pwsh.clone(),
             "-Command".to_string(),
-            "-git cat-file -p HEAD:foo.rs".to_string(),
+            "-git cat-file -p HEAD:foo.rs".to_string()
         ]));
 
-        assert!(is_safe_command_windows(&vec![
+        assert!(is_safe_command_windows(&[
             pwsh.clone(),
             "-Command".to_string(),
-            "(Get-Content foo.rs -Raw)".to_string(),
+            "(Get-Content foo.rs -Raw)".to_string()
         ]));
 
-        assert!(is_safe_command_windows(&vec![
+        assert!(is_safe_command_windows(&[
             pwsh,
             "-Command".to_string(),
-            "Get-Item foo.rs | Select-Object Length".to_string(),
+            "Get-Item foo.rs | Select-Object Length".to_string()
         ]));
     }
 
@@ -613,8 +613,8 @@ mod tests {
     }
 
     fn pwsh_executable() -> Option<String> {
-        if cfg!(windows) {
-            if let Some(home) = Command::new("cmd")
+        if cfg!(windows)
+            && let Some(home) = Command::new("cmd")
                 .args(["/C", "pwsh", "-NoProfile", "-Command", "$PSHOME"])
                 .output()
                 .ok()
@@ -626,13 +626,12 @@ mod tests {
                     let trimmed = stdout.trim();
                     (!trimmed.is_empty()).then(|| trimmed.to_string())
                 })
+        {
+            let candidate = Path::new(&home).join("pwsh.exe");
+            if let Some(candidate_str) = candidate.to_str()
+                && is_executable_available(candidate_str)
             {
-                let candidate = Path::new(&home).join("pwsh.exe");
-                if let Some(candidate_str) = candidate.to_str() {
-                    if is_executable_available(candidate_str) {
-                        return Some(candidate_str.to_string());
-                    }
-                }
+                return Some(candidate_str.to_string());
             }
         }
 
