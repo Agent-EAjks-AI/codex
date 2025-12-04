@@ -279,12 +279,13 @@ $result = if ($commands -eq $null) {{
     @{{ status = 'ok'; commands = $commands }}
 }}
 
-$result | ConvertTo-Json -Depth 10
+$result | ConvertTo-Json -Depth 3
 "#,
     )
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PowershellParserOutput {
     status: String,
     commands: Option<Vec<Vec<String>>>,
@@ -295,7 +296,12 @@ impl PowershellParserOutput {
         match self.status.as_str() {
             "ok" => self
                 .commands
-                .filter(|commands| !commands.is_empty())
+                .filter(|commands| {
+                    !commands.is_empty()
+                        && commands
+                            .iter()
+                            .all(|cmd| !cmd.is_empty() && cmd.iter().all(|word| !word.is_empty()))
+                })
                 .map(PowershellParseOutcome::Commands)
                 .unwrap_or(PowershellParseOutcome::Unsupported),
             "unsupported" => PowershellParseOutcome::Unsupported,
@@ -664,6 +670,13 @@ mod tests {
             "powershell.exe",
             "-Command",
             "Write-Output $(Get-Content foo)"
+        ])));
+
+        // Empty words from the parser (e.g. '') are rejected.
+        assert!(!is_safe_command_windows(&vec_str(&[
+            "powershell.exe",
+            "-Command",
+            "''"
         ])));
     }
 
