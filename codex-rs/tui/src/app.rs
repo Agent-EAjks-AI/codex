@@ -515,45 +515,57 @@ impl App {
                     return Ok(true);
                 }
                 let cells = self.transcript_cells.clone();
-                tui.draw(
-                    //self.chat_widget.desired_height(tui.terminal.size()?.width),
-                    tui.terminal.size()?.height,
-                    |frame| {
-                        let chat_height = self.chat_widget.desired_height(frame.area().width);
-                        // peg chat to the bottom
-                        let chat_area = Rect {
-                            x: frame.area().x,
-                            y: frame.area().bottom().saturating_sub(chat_height),
-                            width: frame.area().width,
-                            height: chat_height,
-                        };
-                        self.chat_widget.render(chat_area, frame.buffer);
-                        if let Some((x, y)) = self.chat_widget.cursor_pos(chat_area) {
-                            frame.set_cursor_position((x, y));
-                        }
-                        self.render_transcript_cells(frame, &cells);
+                tui.draw(tui.terminal.size()?.height, |frame| {
+                    let chat_height = self.chat_widget.desired_height(frame.area().width);
+                    let chat_top = self.render_transcript_cells(frame, &cells, chat_height);
+                    let chat_area = Rect {
+                        x: frame.area().x,
+                        y: chat_top,
+                        width: frame.area().width,
+                        height: chat_height.min(
+                            frame
+                                .area()
+                                .height
+                                .saturating_sub(chat_top.saturating_sub(frame.area().y)),
+                        ),
+                    };
+                    self.chat_widget.render(chat_area, frame.buffer);
+                    let chat_bottom = chat_area.y.saturating_add(chat_area.height);
+                    if chat_bottom < frame.area().bottom() {
+                        Clear.render_ref(
+                            Rect {
+                                x: frame.area().x,
+                                y: chat_bottom,
+                                width: frame.area().width,
+                                height: frame.area().bottom().saturating_sub(chat_bottom),
+                            },
+                            frame.buffer,
+                        );
+                    }
+                    if let Some((x, y)) = self.chat_widget.cursor_pos(chat_area) {
+                        frame.set_cursor_position((x, y));
+                    }
 
-                        let transcript_scrolled =
-                            !matches!(self.transcript_scroll, TranscriptScroll::ToBottom);
-                        let selection_active = matches!(
-                            (self.transcript_selection.anchor, self.transcript_selection.head),
-                            (Some(a), Some(b)) if a != b
-                        );
-                        let scroll_position = if self.transcript_total_lines == 0 {
-                            None
-                        } else {
-                            Some((
-                                self.transcript_view_top.saturating_add(1),
-                                self.transcript_total_lines,
-                            ))
-                        };
-                        self.chat_widget.set_transcript_ui_state(
-                            transcript_scrolled,
-                            selection_active,
-                            scroll_position,
-                        );
-                    },
-                )?;
+                    let transcript_scrolled =
+                        !matches!(self.transcript_scroll, TranscriptScroll::ToBottom);
+                    let selection_active = matches!(
+                        (self.transcript_selection.anchor, self.transcript_selection.head),
+                        (Some(a), Some(b)) if a != b
+                    );
+                    let scroll_position = if self.transcript_total_lines == 0 {
+                        None
+                    } else {
+                        Some((
+                            self.transcript_view_top.saturating_add(1),
+                            self.transcript_total_lines,
+                        ))
+                    };
+                    self.chat_widget.set_transcript_ui_state(
+                        transcript_scrolled,
+                        selection_active,
+                        scroll_position,
+                    );
+                })?;
             }
         }
 
@@ -564,43 +576,27 @@ impl App {
         &mut self,
         frame: &mut Frame,
         cells: &[Arc<dyn HistoryCell>],
-    ) {
+        chat_height: u16,
+    ) -> u16 {
         let area = frame.area();
         if area.width == 0 || area.height == 0 {
-            return;
+            return area.bottom().saturating_sub(chat_height);
         }
 
-        let chat_height = self.chat_widget.desired_height(area.width);
-        if chat_height >= area.height {
-            return;
-        }
-
-        let transcript_height = area.height.saturating_sub(chat_height);
-        if transcript_height == 0 {
-            return;
-        }
-
-        if cells.is_empty() {
-            Clear.render_ref(
-                Rect {
-                    x: area.x,
-                    y: area.y,
-                    width: area.width,
-                    height: transcript_height,
-                },
-                frame.buffer,
-            );
+        let chat_height = chat_height.min(area.height);
+        let max_transcript_height = area.height.saturating_sub(chat_height);
+        if max_transcript_height == 0 {
             self.transcript_scroll = TranscriptScroll::ToBottom;
             self.transcript_view_top = 0;
             self.transcript_total_lines = 0;
-            return;
+            return area.y;
         }
 
         let transcript_area = Rect {
             x: area.x,
             y: area.y,
             width: area.width,
-            height: transcript_height,
+            height: max_transcript_height,
         };
 
         let (lines, meta) = build_transcript_lines(cells, transcript_area.width);
@@ -615,12 +611,12 @@ impl App {
             self.transcript_scroll = TranscriptScroll::ToBottom;
             self.transcript_view_top = 0;
             self.transcript_total_lines = 0;
-            return;
+            return area.y;
         }
 
         let total_lines = lines.len();
         self.transcript_total_lines = total_lines;
-        let max_visible = transcript_area.height as usize;
+        let max_visible = std::cmp::min(max_transcript_height as usize, total_lines);
         let max_start = total_lines.saturating_sub(max_visible);
 
         let top_offset = match self.transcript_scroll {
@@ -648,7 +644,35 @@ impl App {
         };
         self.transcript_view_top = top_offset;
 
-        Clear.render_ref(transcript_area, frame.buffer);
+        let transcript_visible_height = max_visible as u16;
+        let chat_top = if total_lines <= max_transcript_height as usize {
+            let gap = if transcript_visible_height == 0 { 0 } else { 1 };
+            area.y
+                .saturating_add(transcript_visible_height)
+                .saturating_add(gap)
+        } else {
+            area.bottom().saturating_sub(chat_height)
+        };
+
+        let clear_height = chat_top.saturating_sub(area.y);
+        if clear_height > 0 {
+            Clear.render_ref(
+                Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: area.width,
+                    height: clear_height,
+                },
+                frame.buffer,
+            );
+        }
+
+        let transcript_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: transcript_visible_height,
+        };
 
         for (row_index, line_index) in (top_offset..total_lines).enumerate() {
             if row_index >= max_visible {
@@ -675,6 +699,7 @@ impl App {
         }
 
         self.apply_transcript_selection(transcript_area, frame.buffer);
+        chat_top
     }
 
     fn apply_transcript_selection(&self, area: Rect, buf: &mut Buffer) {
