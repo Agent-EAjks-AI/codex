@@ -8,6 +8,6 @@ expression: term.backend()
 "should wrap when        "
 "rendered within a narrow"
 "─────────────────── 0% ─"
-" ↑/↓/k/j to scroll   pgu"
+" ↑/↓ to scroll   pgup/pg"
 " q to quit              "
 "                        "

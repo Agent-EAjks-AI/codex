@@ -71,6 +71,7 @@ const KEY_J: KeyBinding = key_hint::plain(KeyCode::Char('j'));
 const KEY_PAGE_UP: KeyBinding = key_hint::plain(KeyCode::PageUp);
 const KEY_PAGE_DOWN: KeyBinding = key_hint::plain(KeyCode::PageDown);
 const KEY_SPACE: KeyBinding = key_hint::plain(KeyCode::Char(' '));
+const KEY_SHIFT_SPACE: KeyBinding = key_hint::shift(KeyCode::Char(' '));
 const KEY_HOME: KeyBinding = key_hint::plain(KeyCode::Home);
 const KEY_END: KeyBinding = key_hint::plain(KeyCode::End);
 const KEY_CTRL_F: KeyBinding = key_hint::ctrl(KeyCode::Char('f'));
@@ -85,12 +86,11 @@ const KEY_CTRL_C: KeyBinding = key_hint::ctrl(KeyCode::Char('c'));
 
 // Common pager navigation hints rendered on the first line
 const PAGER_KEY_HINTS: &[(&[KeyBinding], &str)] = &[
-    (&[KEY_UP, KEY_DOWN, KEY_K, KEY_J], "to scroll"),
+    (&[KEY_UP, KEY_DOWN], "to scroll"),
     (
-        &[KEY_PAGE_UP, KEY_PAGE_DOWN, KEY_CTRL_B, KEY_CTRL_F],
+        &[KEY_PAGE_UP, KEY_PAGE_DOWN, KEY_SHIFT_SPACE, KEY_SPACE],
         "to page",
     ),
-    (&[KEY_CTRL_U, KEY_CTRL_D], "half page"),
     (&[KEY_HOME, KEY_END], "to jump"),
 ];
 
@@ -250,7 +250,10 @@ impl PagerView {
             e if KEY_DOWN.is_press(e) || KEY_J.is_press(e) => {
                 self.scroll_offset = self.scroll_offset.saturating_add(1);
             }
-            e if KEY_PAGE_UP.is_press(e) || KEY_CTRL_B.is_press(e) => {
+            e if KEY_PAGE_UP.is_press(e)
+                || KEY_SHIFT_SPACE.is_press(e)
+                || KEY_CTRL_B.is_press(e) =>
+            {
                 let area = self.content_area(tui.terminal.viewport_area);
                 self.scroll_offset = self.scroll_offset.saturating_sub(area.height as usize);
             }
