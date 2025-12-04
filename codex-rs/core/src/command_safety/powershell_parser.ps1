@@ -96,7 +96,7 @@ function Convert-PipelineElement {
             }
             $parts += $converted
         }
-        return ,$parts
+        return $parts
     }
 
     if ($element -is [System.Management.Automation.Language.CommandExpressionAst]) {
@@ -117,31 +117,79 @@ function Convert-PipelineElement {
     return $null
 }
 
-$commands = @()
+function Add-CommandsFromPipelineAst {
+    param($pipeline, $commands)
 
-foreach ($statement in $ast.EndBlock.Statements) {
-    if ($statement -isnot [System.Management.Automation.Language.PipelineAst]) {
-        $commands = $null
-        break
+    if ($pipeline.PipelineElements.Count -eq 0) {
+        return $false
     }
 
-    if ($statement.PipelineElements.Count -eq 0) {
-        $commands = $null
-        break
-    }
-
-    foreach ($element in $statement.PipelineElements) {
+    foreach ($element in $pipeline.PipelineElements) {
         $words = Convert-PipelineElement $element
         if ($words -eq $null -or $words.Count -eq 0) {
-            $commands = $null
-            break
+            return $false
         }
-        $commands += ,$words
+        $null = $commands.Add($words)
     }
 
-    if ($commands -eq $null) {
+    return $true
+}
+
+function Add-CommandsFromPipelineChain {
+    param($chain, $commands)
+
+    if (-not (Add-CommandsFromPipelineBase $chain.LhsPipelineChain $commands)) {
+        return $false
+    }
+
+    if (-not (Add-CommandsFromPipelineAst $chain.RhsPipeline $commands)) {
+        return $false
+    }
+
+    return $true
+}
+
+function Add-CommandsFromPipelineBase {
+    param($pipeline, $commands)
+
+    if ($pipeline -is [System.Management.Automation.Language.PipelineAst]) {
+        return Add-CommandsFromPipelineAst $pipeline $commands
+    }
+
+    if ($pipeline -is [System.Management.Automation.Language.PipelineChainAst]) {
+        return Add-CommandsFromPipelineChain $pipeline $commands
+    }
+
+    return $false
+}
+
+$commands = [System.Collections.ArrayList]::new()
+
+foreach ($statement in $ast.EndBlock.Statements) {
+    if (-not (Add-CommandsFromPipelineBase $statement $commands)) {
+        $commands = $null
         break
     }
+}
+
+if ($commands -ne $null) {
+    $normalized = [System.Collections.ArrayList]::new()
+    foreach ($cmd in $commands) {
+        if ($cmd -is [string]) {
+            $null = $normalized.Add(@($cmd))
+            continue
+        }
+
+        if ($cmd -is [System.Array] -or $cmd -is [System.Collections.IEnumerable]) {
+            $null = $normalized.Add(@($cmd))
+            continue
+        }
+
+        $normalized = $null
+        break
+    }
+
+    $commands = $normalized
 }
 
 $result = if ($commands -eq $null) {
@@ -150,4 +198,4 @@ $result = if ($commands -eq $null) {
     @{ status = 'ok'; commands = $commands }
 }
 
-$result | ConvertTo-Json -Depth 3
+,$result | ConvertTo-Json -Depth 3
