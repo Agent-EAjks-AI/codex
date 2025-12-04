@@ -43,6 +43,13 @@ function Convert-CommandElement {
         return @($element.Value)
     }
 
+    if ($element -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) {
+        if ($element.NestedExpressions.Count -gt 0) {
+            return $null
+        }
+        return @($element.Value)
+    }
+
     if ($element -is [System.Management.Automation.Language.ConstantExpressionAst]) {
         return @($element.Value.ToString())
     }
@@ -71,6 +78,13 @@ function Convert-PipelineElement {
 
     if ($element -is [System.Management.Automation.Language.CommandAst]) {
         if ($element.Redirections.Count -gt 0) {
+            return $null
+        }
+
+        if (
+            $element.InvocationOperator -ne $null -and
+            $element.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown
+        ) {
             return $null
         }
 

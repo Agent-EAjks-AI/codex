@@ -117,8 +117,8 @@ fn is_powershell_executable(exe: &str) -> bool {
 }
 
 /// Attempts to parse PowerShell using the real PowerShell parser, returning every pipeline element
-/// as a flat argv vector when possible. Falls back to the legacy tokenizer only when PowerShell
-/// itself cannot be invoked.
+/// as a flat argv vector when possible. If parsing fails or the AST includes unsupported constructs,
+/// we conservatively reject the command instead of trying to split it manually.
 fn parse_with_powershell_ast(script: &str) -> PowershellParseOutcome {
     let encoded_script = encode_powershell_base64(script);
     let encoded_parser_script = encoded_parser_script();
@@ -254,17 +254,6 @@ fn is_safe_powershell_command(words: &[String]) -> bool {
             // Examples rejected here: "Write-Output (Set-Content foo6.txt 'abc')" and "Get-Content (New-Item bar.txt)".
             return false;
         }
-    }
-
-    // Block PowerShell call operator or any redirection explicitly.
-    if words.iter().any(|w| {
-        matches!(
-            w.as_str(),
-            "&" | ">" | ">>" | "1>" | "2>" | "2>&1" | "*>" | "<" | "<<"
-        )
-    }) {
-        // Examples rejected here: "pwsh -Command '& Remove-Item foo'" and "pwsh -Command 'Get-Content foo > bar'".
-        return false;
     }
 
     let command = words[0]
@@ -571,6 +560,27 @@ mod tests {
             "powershell.exe",
             "-Command",
             "Get-Content 'foo bar'"
+        ])));
+
+        assert!(is_safe_command_windows(&vec_str(&[
+            "powershell.exe",
+            "-Command",
+            "Get-Content \"foo bar\""
+        ])));
+    }
+
+    #[test]
+    fn rejects_dynamic_arguments() {
+        assert!(!is_safe_command_windows(&vec_str(&[
+            "powershell.exe",
+            "-Command",
+            "Get-Content $foo"
+        ])));
+
+        assert!(!is_safe_command_windows(&vec_str(&[
+            "powershell.exe",
+            "-Command",
+            "Write-Output \"foo $bar\""
         ])));
     }
 }
