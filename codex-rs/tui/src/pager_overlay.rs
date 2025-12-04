@@ -87,10 +87,7 @@ const KEY_CTRL_C: KeyBinding = key_hint::ctrl(KeyCode::Char('c'));
 // Common pager navigation hints rendered on the first line
 const PAGER_KEY_HINTS: &[(&[KeyBinding], &str)] = &[
     (&[KEY_UP, KEY_DOWN], "to scroll"),
-    (
-        &[KEY_PAGE_UP, KEY_PAGE_DOWN, KEY_SHIFT_SPACE, KEY_SPACE],
-        "to page",
-    ),
+    (&[KEY_PAGE_UP, KEY_PAGE_DOWN], "to page"),
     (&[KEY_HOME, KEY_END], "to jump"),
 ];
 
