@@ -14,6 +14,8 @@ use crate::tui;
 use crate::tui::TuiEvent;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::MouseEvent;
+use crossterm::event::MouseEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell;
 use ratatui::layout::Rect;
@@ -263,6 +265,24 @@ impl PagerView {
         Ok(())
     }
 
+    fn handle_mouse_scroll(&mut self, tui: &mut tui::Tui, event: MouseEvent) -> Result<()> {
+        let step: usize = 3;
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(step);
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_offset = self.scroll_offset.saturating_add(step);
+            }
+            _ => {
+                return Ok(());
+            }
+        }
+        tui.frame_requester()
+            .schedule_frame_in(Duration::from_millis(16));
+        Ok(())
+    }
+
     fn update_last_content_height(&mut self, height: u16) {
         self.last_content_height = Some(height as usize);
     }
@@ -476,6 +496,7 @@ impl TranscriptOverlay {
                 }
                 other => self.view.handle_key_event(tui, other),
             },
+            TuiEvent::Mouse(mouse_event) => self.view.handle_mouse_scroll(tui, mouse_event),
             TuiEvent::Draw => {
                 tui.draw(u16::MAX, |frame| {
                     self.render(frame.area(), frame.buffer);
@@ -535,6 +556,7 @@ impl StaticOverlay {
                 }
                 other => self.view.handle_key_event(tui, other),
             },
+            TuiEvent::Mouse(mouse_event) => self.view.handle_mouse_scroll(tui, mouse_event),
             TuiEvent::Draw => {
                 tui.draw(u16::MAX, |frame| {
                     self.render(frame.area(), frame.buffer);
