@@ -1,5 +1,8 @@
-use shlex::split as shlex_split;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use serde::Deserialize;
 use std::path::Path;
+use std::process::Command;
 
 /// On Windows, we conservatively allow only clearly read-only PowerShell invocations
 /// that match a small safelist. Anything else (including direct CMD commands) is unsafe.
@@ -77,7 +80,8 @@ fn parse_powershell_invocation(args: &[String]) -> Option<Vec<Vec<String>>> {
             // This happens if powershell is invoked without -Command, e.g.
             // ["pwsh", "-NoLogo", "git", "-c", "core.pager=cat", "status"]
             _ => {
-                return split_into_commands(args[idx..].to_vec());
+                let script = join_arguments_as_script(&args[idx..]);
+                return parse_powershell_script(&script);
             }
         }
     }
@@ -89,45 +93,10 @@ fn parse_powershell_invocation(args: &[String]) -> Option<Vec<Vec<String>>> {
 /// Tokenizes an inline PowerShell script and delegates to the command splitter.
 /// Examples of when this is called: pwsh.exe -Command '<script>' or pwsh.exe -Command:<script>
 fn parse_powershell_script(script: &str) -> Option<Vec<Vec<String>>> {
-    let tokens = shlex_split(script)?;
-    split_into_commands(tokens)
-}
-
-/// Splits tokens into pipeline segments while ensuring no unsafe separators slip through.
-/// e.g. Get-ChildItem | Measure-Object -> [['Get-ChildItem'], ['Measure-Object']]
-fn split_into_commands(tokens: Vec<String>) -> Option<Vec<Vec<String>>> {
-    if tokens.is_empty() {
-        // Examples rejected here: "pwsh -Command ''" and "powershell -Command \"\"".
-        return None;
+    if let PowershellParseOutcome::Commands(commands) = parse_with_powershell_ast(script) {
+        return Some(commands);
     }
-
-    let mut commands = Vec::new();
-    let mut current = Vec::new();
-    for token in tokens.into_iter() {
-        match token.as_str() {
-            "|" | "||" | "&&" | ";" => {
-                if current.is_empty() {
-                    // Examples rejected here: "pwsh -Command '| Get-ChildItem'" and "pwsh -Command '; dir'".
-                    return None;
-                }
-                commands.push(current);
-                current = Vec::new();
-            }
-            // Reject if any token embeds separators, redirection, or call operator characters.
-            _ if token.contains(['|', ';', '>', '<', '&']) || token.contains("$(") => {
-                // Examples rejected here: "pwsh -Command 'dir|select'" and "pwsh -Command 'echo hi > out.txt'".
-                return None;
-            }
-            _ => current.push(token),
-        }
-    }
-
-    if current.is_empty() {
-        // Examples rejected here: "pwsh -Command 'dir |'" and "pwsh -Command 'Get-ChildItem ;'".
-        return None;
-    }
-    commands.push(current);
-    Some(commands)
+    None
 }
 
 /// Returns true when the executable name is one of the supported PowerShell binaries.
@@ -142,6 +111,226 @@ fn is_powershell_executable(exe: &str) -> bool {
         executable_name.as_str(),
         "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
     )
+}
+
+/// Attempts to parse PowerShell using the real PowerShell parser, returning every pipeline element
+/// as a flat argv vector when possible. Falls back to the legacy tokenizer only when PowerShell
+/// itself cannot be invoked.
+fn parse_with_powershell_ast(script: &str) -> PowershellParseOutcome {
+    let encoded_script = encode_powershell_base64(script);
+    let parser_script = build_parser_script(&encoded_script);
+    let encoded_parser_script = encode_powershell_base64(&parser_script);
+
+    for candidate in powershell_candidates() {
+        let Ok(output) = Command::new(candidate)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &encoded_parser_script,
+            ])
+            .output()
+        else {
+            continue;
+        };
+
+        if !output.status.success() {
+            continue;
+        }
+
+        if let Ok(result) =
+            serde_json::from_slice::<PowershellParserOutput>(output.stdout.as_slice())
+        {
+            return result.into_outcome();
+        }
+    }
+
+    PowershellParseOutcome::Failed
+}
+
+fn powershell_candidates() -> &'static [&'static str] {
+    &["powershell", "powershell.exe", "pwsh", "pwsh.exe"]
+}
+
+fn encode_powershell_base64(script: &str) -> String {
+    let mut utf16 = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        utf16.extend_from_slice(&unit.to_le_bytes());
+    }
+    BASE64_STANDARD.encode(utf16)
+}
+
+fn build_parser_script(encoded_script: &str) -> String {
+    format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+
+$source = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String("{encoded_script}"))
+$tokens = $null
+$errors = $null
+
+$ast = $null
+try {{
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+}} catch {{
+    Write-Output '{{"status":"parse_failed"}}'
+    exit 0
+}}
+
+if ($errors.Count -gt 0) {{
+    Write-Output '{{"status":"parse_errors"}}'
+    exit 0
+}}
+
+function Convert-CommandElement($element) {{
+    if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) {{
+        return @($element.Value)
+    }}
+
+    if ($element -is [System.Management.Automation.Language.ConstantExpressionAst]) {{
+        return @($element.Value.ToString())
+    }}
+
+    if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {{
+        if ($element.Argument -eq $null) {{
+            return @('-' + $element.ParameterName)
+        }}
+
+        if ($element.Argument -is [System.Management.Automation.Language.StringConstantExpressionAst]) {{
+            return @('-' + $element.ParameterName, $element.Argument.Value)
+        }}
+
+        if ($element.Argument -is [System.Management.Automation.Language.ConstantExpressionAst]) {{
+            return @('-' + $element.ParameterName, $element.Argument.Value.ToString())
+        }}
+
+        return $null
+    }}
+
+    return $null
+}}
+
+function Convert-PipelineElement($element) {{
+    if ($element -is [System.Management.Automation.Language.CommandAst]) {{
+        if ($element.Redirections.Count -gt 0) {{
+            return $null
+        }}
+
+        $parts = @()
+        foreach ($commandElement in $element.CommandElements) {{
+            $converted = Convert-CommandElement $commandElement
+            if ($converted -eq $null) {{
+                return $null
+            }}
+            $parts += $converted
+        }}
+        return ,$parts
+    }}
+
+    if ($element -is [System.Management.Automation.Language.CommandExpressionAst]) {{
+        if ($element.Redirections.Count -gt 0) {{
+            return $null
+        }}
+
+        if ($element.Expression -is [System.Management.Automation.Language.ParenExpressionAst]) {{
+            $innerPipeline = $element.Expression.Pipeline
+            if ($innerPipeline -and $innerPipeline.PipelineElements.Count -eq 1) {{
+                return Convert-PipelineElement $innerPipeline.PipelineElements[0]
+            }}
+        }}
+
+        return $null
+    }}
+
+    return $null
+}}
+
+$commands = @()
+
+foreach ($statement in $ast.EndBlock.Statements) {{
+    if ($statement -isnot [System.Management.Automation.Language.PipelineAst]) {{
+        $commands = $null
+        break
+    }}
+
+    if ($statement.PipelineElements.Count -eq 0) {{
+        $commands = $null
+        break
+    }}
+
+    foreach ($element in $statement.PipelineElements) {{
+        $words = Convert-PipelineElement $element
+        if ($words -eq $null -or $words.Count -eq 0) {{
+            $commands = $null
+            break
+        }}
+        $commands += ,$words
+    }}
+
+    if ($commands -eq $null) {{
+        break
+    }}
+}}
+
+$result = if ($commands -eq $null) {{
+    @{{ status = 'unsupported' }}
+}} else {{
+    @{{ status = 'ok'; commands = $commands }}
+}}
+
+$result | ConvertTo-Json -Depth 10
+"#,
+    )
+}
+
+#[derive(Deserialize)]
+struct PowershellParserOutput {
+    status: String,
+    commands: Option<Vec<Vec<String>>>,
+}
+
+impl PowershellParserOutput {
+    fn into_outcome(self) -> PowershellParseOutcome {
+        match self.status.as_str() {
+            "ok" => self
+                .commands
+                .filter(|commands| !commands.is_empty())
+                .map(PowershellParseOutcome::Commands)
+                .unwrap_or(PowershellParseOutcome::Unsupported),
+            "unsupported" => PowershellParseOutcome::Unsupported,
+            _ => PowershellParseOutcome::Failed,
+        }
+    }
+}
+
+enum PowershellParseOutcome {
+    Commands(Vec<Vec<String>>),
+    Unsupported,
+    Failed,
+}
+
+fn join_arguments_as_script(args: &[String]) -> String {
+    let mut words = Vec::with_capacity(args.len());
+    if let Some((first, rest)) = args.split_first() {
+        words.push(first.clone());
+        for arg in rest {
+            words.push(quote_argument(arg));
+        }
+    }
+    words.join(" ")
+}
+
+fn quote_argument(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+
+    if arg.chars().all(|ch| !ch.is_whitespace()) {
+        return arg.to_string();
+    }
+
+    format!("'{}'", arg.replace('\'', "''"))
 }
 
 /// Validates that a parsed PowerShell command stays within our read-only safelist.
@@ -279,7 +468,7 @@ fn is_safe_git_command(words: &[String]) -> bool {
     false
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::is_safe_command_windows;
     use std::string::ToString;
@@ -454,6 +643,36 @@ mod tests {
             "powershell.exe",
             "-Command",
             "Get-Content (New-Item bar.txt)",
+        ])));
+
+        // Unsafe @ expansion.
+        assert!(!is_safe_command_windows(&vec_str(&[
+            "powershell.exe",
+            "-Command",
+            "ls @(calc.exe)"
+        ])));
+
+        // Unsupported constructs that the AST parser refuses (no fallback to manual splitting).
+        assert!(!is_safe_command_windows(&vec_str(&[
+            "powershell.exe",
+            "-Command",
+            "ls && pwd"
+        ])));
+
+        // Sub-expressions are rejected even if they contain otherwise safe commands.
+        assert!(!is_safe_command_windows(&vec_str(&[
+            "powershell.exe",
+            "-Command",
+            "Write-Output $(Get-Content foo)"
+        ])));
+    }
+
+    #[test]
+    fn accepts_constant_expression_arguments() {
+        assert!(is_safe_command_windows(&vec_str(&[
+            "powershell.exe",
+            "-Command",
+            "Get-Content 'foo bar'"
         ])));
     }
 }
