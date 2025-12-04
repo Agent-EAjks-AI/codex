@@ -3,6 +3,9 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
+use std::sync::LazyLock;
+
+const POWERSHELL_PARSER_SCRIPT: &str = include_str!("powershell_parser.ps1");
 
 /// On Windows, we conservatively allow only clearly read-only PowerShell invocations
 /// that match a small safelist. Anything else (including direct CMD commands) is unsafe.
@@ -118,9 +121,7 @@ fn is_powershell_executable(exe: &str) -> bool {
 /// itself cannot be invoked.
 fn parse_with_powershell_ast(script: &str) -> PowershellParseOutcome {
     let encoded_script = encode_powershell_base64(script);
-    let parser_script = build_parser_script(&encoded_script);
-    let encoded_parser_script = encode_powershell_base64(&parser_script);
-
+    let encoded_parser_script = encoded_parser_script();
     for candidate in powershell_candidates() {
         let Ok(output) = Command::new(candidate)
             .args([
@@ -128,8 +129,9 @@ fn parse_with_powershell_ast(script: &str) -> PowershellParseOutcome {
                 "-NoProfile",
                 "-NonInteractive",
                 "-EncodedCommand",
-                &encoded_parser_script,
+                encoded_parser_script,
             ])
+            .env("CODEX_POWERSHELL_PAYLOAD", &encoded_script)
             .output()
         else {
             continue;
@@ -161,127 +163,10 @@ fn encode_powershell_base64(script: &str) -> String {
     BASE64_STANDARD.encode(utf16)
 }
 
-fn build_parser_script(encoded_script: &str) -> String {
-    format!(
-        r#"
-$ErrorActionPreference = 'Stop'
-
-$source = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String("{encoded_script}"))
-$tokens = $null
-$errors = $null
-
-$ast = $null
-try {{
-    $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
-}} catch {{
-    Write-Output '{{"status":"parse_failed"}}'
-    exit 0
-}}
-
-if ($errors.Count -gt 0) {{
-    Write-Output '{{"status":"parse_errors"}}'
-    exit 0
-}}
-
-function Convert-CommandElement($element) {{
-    if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) {{
-        return @($element.Value)
-    }}
-
-    if ($element -is [System.Management.Automation.Language.ConstantExpressionAst]) {{
-        return @($element.Value.ToString())
-    }}
-
-    if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {{
-        if ($element.Argument -eq $null) {{
-            return @('-' + $element.ParameterName)
-        }}
-
-        if ($element.Argument -is [System.Management.Automation.Language.StringConstantExpressionAst]) {{
-            return @('-' + $element.ParameterName, $element.Argument.Value)
-        }}
-
-        if ($element.Argument -is [System.Management.Automation.Language.ConstantExpressionAst]) {{
-            return @('-' + $element.ParameterName, $element.Argument.Value.ToString())
-        }}
-
-        return $null
-    }}
-
-    return $null
-}}
-
-function Convert-PipelineElement($element) {{
-    if ($element -is [System.Management.Automation.Language.CommandAst]) {{
-        if ($element.Redirections.Count -gt 0) {{
-            return $null
-        }}
-
-        $parts = @()
-        foreach ($commandElement in $element.CommandElements) {{
-            $converted = Convert-CommandElement $commandElement
-            if ($converted -eq $null) {{
-                return $null
-            }}
-            $parts += $converted
-        }}
-        return ,$parts
-    }}
-
-    if ($element -is [System.Management.Automation.Language.CommandExpressionAst]) {{
-        if ($element.Redirections.Count -gt 0) {{
-            return $null
-        }}
-
-        if ($element.Expression -is [System.Management.Automation.Language.ParenExpressionAst]) {{
-            $innerPipeline = $element.Expression.Pipeline
-            if ($innerPipeline -and $innerPipeline.PipelineElements.Count -eq 1) {{
-                return Convert-PipelineElement $innerPipeline.PipelineElements[0]
-            }}
-        }}
-
-        return $null
-    }}
-
-    return $null
-}}
-
-$commands = @()
-
-foreach ($statement in $ast.EndBlock.Statements) {{
-    if ($statement -isnot [System.Management.Automation.Language.PipelineAst]) {{
-        $commands = $null
-        break
-    }}
-
-    if ($statement.PipelineElements.Count -eq 0) {{
-        $commands = $null
-        break
-    }}
-
-    foreach ($element in $statement.PipelineElements) {{
-        $words = Convert-PipelineElement $element
-        if ($words -eq $null -or $words.Count -eq 0) {{
-            $commands = $null
-            break
-        }}
-        $commands += ,$words
-    }}
-
-    if ($commands -eq $null) {{
-        break
-    }}
-}}
-
-$result = if ($commands -eq $null) {{
-    @{{ status = 'unsupported' }}
-}} else {{
-    @{{ status = 'ok'; commands = $commands }}
-}}
-
-$result | ConvertTo-Json -Depth 3
-"#,
-    )
+fn encoded_parser_script() -> &'static str {
+    static ENCODED: LazyLock<String> =
+        LazyLock::new(|| encode_powershell_base64(POWERSHELL_PARSER_SCRIPT));
+    &ENCODED
 }
 
 #[derive(Deserialize)]
