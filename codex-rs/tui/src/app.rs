@@ -65,13 +65,13 @@ use std::thread;
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
-const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
 
 #[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
 
+const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const GPT_5_1_MIGRATION_AUTH_MODES: [AuthMode; 2] = [AuthMode::ChatGPT, AuthMode::ApiKey];
 const GPT_5_1_CODEX_MIGRATION_AUTH_MODES: [AuthMode; 2] = [AuthMode::ChatGPT, AuthMode::ApiKey];
 
