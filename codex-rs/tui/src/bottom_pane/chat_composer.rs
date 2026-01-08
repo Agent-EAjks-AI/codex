@@ -48,6 +48,7 @@ use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
 
 use crate::app_event::AppEvent;
+use crate::app_event::ExitMode;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::textarea::TextArea;
 use crate::bottom_pane::textarea::TextAreaState;
@@ -1184,7 +1185,8 @@ impl ChatComposer {
                 kind: KeyEventKind::Press,
                 ..
             } if self.is_empty() => {
-                self.app_event_tx.send(AppEvent::ExitRequest);
+                self.app_event_tx
+                    .send(AppEvent::Exit(ExitMode::ShutdownFirst { confirm: true }));
                 (InputResult::None, true)
             }
             // -------------------------------------------------------------

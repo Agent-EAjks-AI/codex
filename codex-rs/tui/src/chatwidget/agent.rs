@@ -11,6 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::unbounded_channel;
 
 use crate::app_event::AppEvent;
+use crate::app_event::ExitMode;
 use crate::app_event_sender::AppEventSender;
 
 /// Spawn the agent bootstrapper and op forwarding loop, returning the
@@ -38,7 +39,7 @@ pub(crate) fn spawn_agent(
                     id: "".to_string(),
                     msg: EventMsg::Error(err.to_error_event(None)),
                 }));
-                app_event_tx_clone.send(AppEvent::ExitRequest);
+                app_event_tx_clone.send(AppEvent::Exit(ExitMode::Immediate));
                 tracing::error!("failed to initialize codex: {err}");
                 return;
             }

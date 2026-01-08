@@ -38,8 +38,13 @@ pub(crate) enum AppEvent {
     /// Open the resume picker inside the running TUI session.
     OpenResumePicker,
 
-    /// Request to exit the application gracefully.
-    ExitRequest,
+    /// Request to exit the application.
+    ///
+    /// Use `ShutdownFirst` for user-initiated quits so core cleanup runs and the
+    /// UI exits only after `ShutdownComplete`. `Immediate` is a last-resort
+    /// escape hatch that skips shutdown and may drop in-flight work (e.g.,
+    /// background tasks, rollout flush, or child process cleanup).
+    Exit(ExitMode),
 
     /// Forward an `Op` to the Agent. Using an `AppEvent` for this avoids
     /// bubbling channels through layers of widgets.
@@ -147,6 +152,9 @@ pub(crate) enum AppEvent {
     /// Update whether the full access warning prompt has been acknowledged.
     UpdateFullAccessWarningAcknowledged(bool),
 
+    /// Update whether the exit confirmation prompt should be hidden.
+    UpdateExitConfirmationPromptHidden(bool),
+
     /// Update whether the world-writable directories warning has been acknowledged.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     UpdateWorldWritableWarningAcknowledged(bool),
@@ -156,6 +164,9 @@ pub(crate) enum AppEvent {
 
     /// Persist the acknowledgement flag for the full access warning prompt.
     PersistFullAccessWarningAcknowledged,
+
+    /// Persist the acknowledgement flag for the exit confirmation prompt.
+    PersistExitConfirmationPromptHidden,
 
     /// Persist the acknowledgement flag for the world-writable directories warning.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -202,6 +213,17 @@ pub(crate) enum AppEvent {
     OpenFeedbackConsent {
         category: FeedbackCategory,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExitMode {
+    /// Shutdown core and exit after completion; `confirm` controls the prompt.
+    ShutdownFirst { confirm: bool },
+    /// Exit the UI loop immediately without waiting for shutdown.
+    ///
+    /// This skips `Op::Shutdown`, so any in-flight work may be dropped and
+    /// cleanup that normally runs before `ShutdownComplete` can be missed.
+    Immediate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
