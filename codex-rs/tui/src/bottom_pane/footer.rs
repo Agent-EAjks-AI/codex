@@ -19,14 +19,18 @@ pub(crate) struct FooterProps {
     pub(crate) mode: FooterMode,
     pub(crate) esc_backtrack_hint: bool,
     pub(crate) use_shift_enter_hint: bool,
-    pub(crate) is_task_running: bool,
+    /// Which key the user must press again to quit.
+    ///
+    /// This is rendered when `mode` is `FooterMode::QuitShortcutReminder`.
+    pub(crate) quit_shortcut_key: KeyBinding,
     pub(crate) context_window_percent: Option<i64>,
     pub(crate) context_window_used_tokens: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FooterMode {
-    CtrlCReminder,
+    /// Transient "press again to quit" reminder (Ctrl+C/Ctrl+D).
+    QuitShortcutReminder,
     ShortcutSummary,
     ShortcutOverlay,
     EscHint,
@@ -34,12 +38,14 @@ pub(crate) enum FooterMode {
 }
 
 pub(crate) fn toggle_shortcut_mode(current: FooterMode, ctrl_c_hint: bool) -> FooterMode {
-    if ctrl_c_hint && matches!(current, FooterMode::CtrlCReminder) {
+    if ctrl_c_hint && matches!(current, FooterMode::QuitShortcutReminder) {
         return current;
     }
 
     match current {
-        FooterMode::ShortcutOverlay | FooterMode::CtrlCReminder => FooterMode::ShortcutSummary,
+        FooterMode::ShortcutOverlay | FooterMode::QuitShortcutReminder => {
+            FooterMode::ShortcutSummary
+        }
         _ => FooterMode::ShortcutOverlay,
     }
 }
@@ -56,7 +62,7 @@ pub(crate) fn reset_mode_after_activity(current: FooterMode) -> FooterMode {
     match current {
         FooterMode::EscHint
         | FooterMode::ShortcutOverlay
-        | FooterMode::CtrlCReminder
+        | FooterMode::QuitShortcutReminder
         | FooterMode::ContextOnly => FooterMode::ShortcutSummary,
         other => other,
     }
@@ -81,9 +87,9 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
     // the shortcut hint is hidden). Hide it only for the multi-line
     // ShortcutOverlay.
     match props.mode {
-        FooterMode::CtrlCReminder => vec![ctrl_c_reminder_line(CtrlCReminderState {
-            is_task_running: props.is_task_running,
-        })],
+        FooterMode::QuitShortcutReminder => {
+            vec![quit_shortcut_reminder_line(props.quit_shortcut_key)]
+        }
         FooterMode::ShortcutSummary => {
             let mut line = context_window_line(
                 props.context_window_percent,
@@ -118,28 +124,14 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct CtrlCReminderState {
-    is_task_running: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
 struct ShortcutsState {
     use_shift_enter_hint: bool,
     esc_backtrack_hint: bool,
     is_wsl: bool,
 }
 
-fn ctrl_c_reminder_line(state: CtrlCReminderState) -> Line<'static> {
-    let action = if state.is_task_running {
-        "interrupt"
-    } else {
-        "quit"
-    };
-    Line::from(vec![
-        key_hint::ctrl(KeyCode::Char('c')).into(),
-        format!(" again to {action}").into(),
-    ])
-    .dim()
+fn quit_shortcut_reminder_line(key: KeyBinding) -> Line<'static> {
+    Line::from(vec![key.into(), " again to quit".into()]).dim()
 }
 
 fn esc_hint_line(esc_backtrack_hint: bool) -> Line<'static> {
@@ -463,7 +455,7 @@ mod tests {
                 mode: FooterMode::ShortcutSummary,
                 esc_backtrack_hint: false,
                 use_shift_enter_hint: false,
-                is_task_running: false,
+                quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
             },
@@ -475,7 +467,7 @@ mod tests {
                 mode: FooterMode::ShortcutOverlay,
                 esc_backtrack_hint: true,
                 use_shift_enter_hint: true,
-                is_task_running: false,
+                quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
             },
@@ -484,10 +476,10 @@ mod tests {
         snapshot_footer(
             "footer_ctrl_c_quit_idle",
             FooterProps {
-                mode: FooterMode::CtrlCReminder,
+                mode: FooterMode::QuitShortcutReminder,
                 esc_backtrack_hint: false,
                 use_shift_enter_hint: false,
-                is_task_running: false,
+                quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
             },
@@ -496,10 +488,10 @@ mod tests {
         snapshot_footer(
             "footer_ctrl_c_quit_running",
             FooterProps {
-                mode: FooterMode::CtrlCReminder,
+                mode: FooterMode::QuitShortcutReminder,
                 esc_backtrack_hint: false,
                 use_shift_enter_hint: false,
-                is_task_running: true,
+                quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
             },
@@ -511,7 +503,7 @@ mod tests {
                 mode: FooterMode::EscHint,
                 esc_backtrack_hint: false,
                 use_shift_enter_hint: false,
-                is_task_running: false,
+                quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
             },
@@ -523,7 +515,7 @@ mod tests {
                 mode: FooterMode::EscHint,
                 esc_backtrack_hint: true,
                 use_shift_enter_hint: false,
-                is_task_running: false,
+                quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
             },
@@ -535,7 +527,7 @@ mod tests {
                 mode: FooterMode::ShortcutSummary,
                 esc_backtrack_hint: false,
                 use_shift_enter_hint: false,
-                is_task_running: true,
+                quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: Some(72),
                 context_window_used_tokens: None,
             },
@@ -547,7 +539,7 @@ mod tests {
                 mode: FooterMode::ShortcutSummary,
                 esc_backtrack_hint: false,
                 use_shift_enter_hint: false,
-                is_task_running: false,
+                quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: Some(123_456),
             },

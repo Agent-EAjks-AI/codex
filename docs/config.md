@@ -20,9 +20,6 @@ Codex can run a notification hook when the agent finishes a turn. See the config
 
 ## Notices
 
-Codex stores "do not show again" flags for some UI prompts under the `[notice]` table. To suppress the exit confirmation prompt (shown when you press `Ctrl+C` or `Ctrl+D` while idle), set:
+Codex stores "do not show again" flags for some UI prompts under the `[notice]` table.
 
-```toml
-[notice]
-hide_exit_confirmation_prompt = true
-```
+Ctrl+C/Ctrl+D quitting uses a ~1 second double-press hint (`ctrl + c again to quit`).

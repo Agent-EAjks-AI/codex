@@ -721,14 +721,7 @@ impl App {
                 self.on_conversation_history_for_backtrack(tui, ev).await?;
             }
             AppEvent::Exit(mode) => match mode {
-                ExitMode::ShutdownFirst { confirm } => {
-                    let prompt_hidden = self.chat_widget.exit_confirmation_prompt_hidden();
-                    if confirm && !prompt_hidden {
-                        self.chat_widget.open_exit_confirmation_prompt();
-                    } else {
-                        self.chat_widget.submit_op(Op::Shutdown);
-                    }
-                }
+                ExitMode::ShutdownFirst => self.chat_widget.submit_op(Op::Shutdown),
                 ExitMode::Immediate => {
                     return Ok(false);
                 }
@@ -1093,9 +1086,6 @@ impl App {
             AppEvent::UpdateRateLimitSwitchPromptHidden(hidden) => {
                 self.chat_widget.set_rate_limit_switch_prompt_hidden(hidden);
             }
-            AppEvent::UpdateExitConfirmationPromptHidden(hidden) => {
-                self.chat_widget.set_exit_confirmation_prompt_hidden(hidden);
-            }
             AppEvent::PersistFullAccessWarningAcknowledged => {
                 if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
                     .set_hide_full_access_warning(true)
@@ -1138,21 +1128,6 @@ impl App {
                     );
                     self.chat_widget.add_error_message(format!(
                         "Failed to save rate limit reminder preference: {err}"
-                    ));
-                }
-            }
-            AppEvent::PersistExitConfirmationPromptHidden => {
-                if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
-                    .set_hide_exit_confirmation_prompt(true)
-                    .apply()
-                    .await
-                {
-                    tracing::error!(
-                        error = %err,
-                        "failed to persist exit confirmation prompt preference"
-                    );
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to save exit confirmation preference: {err}"
                     ));
                 }
             }
