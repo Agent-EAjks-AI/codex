@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 
 use crate::codex::TurnContext;
 use crate::protocol::ReviewDecision;
+use crate::skills::SkillDependencyResponse;
 use crate::tasks::SessionTask;
 
 /// Metadata about the currently running turn.
@@ -70,6 +71,7 @@ impl ActiveTurn {
 pub(crate) struct TurnState {
     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
     pending_user_input: HashMap<String, oneshot::Sender<RequestUserInputResponse>>,
+    pending_skill_dependencies: HashMap<String, oneshot::Sender<SkillDependencyResponse>>,
     pending_input: Vec<ResponseInputItem>,
 }
 
@@ -91,6 +93,8 @@ impl TurnState {
 
     pub(crate) fn clear_pending(&mut self) {
         self.pending_approvals.clear();
+        self.pending_user_input.clear();
+        self.pending_skill_dependencies.clear();
         self.pending_user_input.clear();
         self.pending_input.clear();
     }
@@ -126,6 +130,21 @@ impl TurnState {
 
     pub(crate) fn has_pending_input(&self) -> bool {
         !self.pending_input.is_empty()
+    }
+
+    pub(crate) fn insert_pending_skill_dependencies(
+        &mut self,
+        key: String,
+        tx: oneshot::Sender<SkillDependencyResponse>,
+    ) -> Option<oneshot::Sender<SkillDependencyResponse>> {
+        self.pending_skill_dependencies.insert(key, tx)
+    }
+
+    pub(crate) fn remove_pending_skill_dependencies(
+        &mut self,
+        key: &str,
+    ) -> Option<oneshot::Sender<SkillDependencyResponse>> {
+        self.pending_skill_dependencies.remove(key)
     }
 }
 

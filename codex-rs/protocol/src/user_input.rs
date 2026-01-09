@@ -28,6 +28,8 @@ pub enum UserInput {
     Skill {
         name: String,
         path: std::path::PathBuf,
+        #[serde(default)]
+        validate_dependencies: bool,
     },
 }
 

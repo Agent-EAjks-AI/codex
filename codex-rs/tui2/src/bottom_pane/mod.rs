@@ -49,6 +49,7 @@ mod chat_composer;
 mod chat_composer_history;
 mod command_popup;
 pub mod custom_prompt_view;
+mod dependency_input_view;
 mod experimental_features_view;
 mod file_search_popup;
 mod footer;
@@ -66,6 +67,7 @@ mod queued_user_messages;
 mod scroll_state;
 mod selection_popup_common;
 mod textarea;
+pub(crate) use dependency_input_view::DependencyInputView;
 pub(crate) use feedback_view::FeedbackNoteView;
 
 /// How long the "press again to quit" hint stays visible.

@@ -203,6 +203,11 @@ impl ShellHandler {
         call_id: String,
         freeform: bool,
     ) -> Result<ToolOutput, FunctionCallError> {
+        let mut exec_params = exec_params;
+        let dependency_env = session.dependency_env().await;
+        if !dependency_env.is_empty() {
+            exec_params.env.extend(dependency_env);
+        }
         // Approval policy guard for explicit escalation in non-OnRequest modes.
         if exec_params
             .sandbox_permissions

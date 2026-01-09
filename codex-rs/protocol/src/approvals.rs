@@ -93,3 +93,22 @@ pub struct ApplyPatchApprovalRequestEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_root: Option<PathBuf>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct SkillDependency {
+    #[serde(rename = "type")]
+    pub dependency_type: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct SkillDependencyRequestEvent {
+    pub id: String,
+    /// Turn ID that this dependency request belongs to.
+    #[serde(default)]
+    pub turn_id: String,
+    pub skill_name: String,
+    pub dependencies: Vec<SkillDependency>,
+}

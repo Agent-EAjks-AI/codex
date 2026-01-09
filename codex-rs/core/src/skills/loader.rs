@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::config_loader::ConfigLayerStack;
+use crate::skills::dependencies::SkillDependency;
 use crate::skills::model::SkillError;
 use crate::skills::model::SkillInterface;
 use crate::skills::model::SkillLoadOutcome;
@@ -37,6 +38,16 @@ struct SkillFrontmatterMetadata {
 struct SkillToml {
     #[serde(default)]
     interface: Option<Interface>,
+    #[serde(default)]
+    dependencies: Vec<SkillDependencyEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillDependencyEntry {
+    #[serde(rename = "type")]
+    dep_type: String,
+    name: Option<String>,
+    description: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -342,7 +353,8 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
         .as_deref()
         .map(sanitize_single_line)
         .filter(|value| !value.is_empty());
-    let interface = load_skill_interface(path);
+    let skill_toml = load_skill_toml(path);
+    let interface = skill_toml.interface;
 
     validate_len(&name, MAX_NAME_LEN, "name")?;
     validate_len(&description, MAX_DESCRIPTION_LEN, "description")?;
@@ -361,17 +373,20 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
         description,
         short_description,
         interface,
+        dependencies: skill_toml.dependencies,
         path: resolved_path,
         scope,
     })
 }
 
-fn load_skill_interface(skill_path: &Path) -> Option<SkillInterface> {
+fn load_skill_toml(skill_path: &Path) -> SkillTomlResult {
     // Fail open: optional SKILL.toml metadata should not block loading SKILL.md.
-    let skill_dir = skill_path.parent()?;
+    let Some(skill_dir) = skill_path.parent() else {
+        return SkillTomlResult::default();
+    };
     let interface_path = skill_dir.join(SKILLS_TOML_FILENAME);
     if !interface_path.exists() {
-        return None;
+        return SkillTomlResult::default();
     }
 
     let contents = match fs::read_to_string(&interface_path) {
@@ -381,7 +396,7 @@ fn load_skill_interface(skill_path: &Path) -> Option<SkillInterface> {
                 "ignoring {path}: failed to read SKILL.toml: {error}",
                 path = interface_path.display()
             );
-            return None;
+            return SkillTomlResult::default();
         }
     };
     let parsed: SkillToml = match toml::from_str(&contents) {
@@ -391,38 +406,71 @@ fn load_skill_interface(skill_path: &Path) -> Option<SkillInterface> {
                 "ignoring {path}: invalid TOML: {error}",
                 path = interface_path.display()
             );
-            return None;
+            return SkillTomlResult::default();
         }
     };
-    let interface = parsed.interface?;
+    let interface = parsed.interface;
 
-    let interface = SkillInterface {
-        display_name: resolve_str(
-            interface.display_name,
-            MAX_NAME_LEN,
-            "interface.display_name",
-        ),
-        short_description: resolve_str(
-            interface.short_description,
-            MAX_SHORT_DESCRIPTION_LEN,
-            "interface.short_description",
-        ),
-        icon_small: resolve_asset_path(skill_dir, "interface.icon_small", interface.icon_small),
-        icon_large: resolve_asset_path(skill_dir, "interface.icon_large", interface.icon_large),
-        brand_color: resolve_color_str(interface.brand_color, "interface.brand_color"),
-        default_prompt: resolve_str(
-            interface.default_prompt,
-            MAX_DEFAULT_PROMPT_LEN,
-            "interface.default_prompt",
-        ),
-    };
-    let has_fields = interface.display_name.is_some()
-        || interface.short_description.is_some()
-        || interface.icon_small.is_some()
-        || interface.icon_large.is_some()
-        || interface.brand_color.is_some()
-        || interface.default_prompt.is_some();
-    if has_fields { Some(interface) } else { None }
+    let interface = interface.map(|interface| {
+        let interface = SkillInterface {
+            display_name: resolve_str(
+                interface.display_name,
+                MAX_NAME_LEN,
+                "interface.display_name",
+            ),
+            short_description: resolve_str(
+                interface.short_description,
+                MAX_SHORT_DESCRIPTION_LEN,
+                "interface.short_description",
+            ),
+            icon_small: resolve_asset_path(skill_dir, "interface.icon_small", interface.icon_small),
+            icon_large: resolve_asset_path(skill_dir, "interface.icon_large", interface.icon_large),
+            brand_color: resolve_color_str(interface.brand_color, "interface.brand_color"),
+            default_prompt: resolve_str(
+                interface.default_prompt,
+                MAX_DEFAULT_PROMPT_LEN,
+                "interface.default_prompt",
+            ),
+        };
+        let has_fields = interface.display_name.is_some()
+            || interface.short_description.is_some()
+            || interface.icon_small.is_some()
+            || interface.icon_large.is_some()
+            || interface.brand_color.is_some()
+            || interface.default_prompt.is_some();
+        if has_fields { Some(interface) } else { None }
+    });
+
+    SkillTomlResult {
+        interface: interface.flatten(),
+        dependencies: parse_dependencies(parsed.dependencies),
+    }
+}
+
+#[derive(Debug, Default)]
+struct SkillTomlResult {
+    interface: Option<SkillInterface>,
+    dependencies: Vec<SkillDependency>,
+}
+
+fn parse_dependencies(entries: Vec<SkillDependencyEntry>) -> Vec<SkillDependency> {
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            if entry.dep_type != "env_var" {
+                return None;
+            }
+            let name = entry.name.map(|value| sanitize_single_line(&value))?;
+            if name.is_empty() {
+                return None;
+            }
+            let description = entry
+                .description
+                .map(|value| sanitize_single_line(&value))
+                .filter(|value| !value.is_empty());
+            Some(SkillDependency { name, description })
+        })
+        .collect()
 }
 
 fn resolve_asset_path(
@@ -741,6 +789,7 @@ default_prompt = "  default   prompt   "
                     brand_color: Some("#3B82F6".to_string()),
                     default_prompt: Some("default prompt".to_string()),
                 }),
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -786,6 +835,7 @@ icon_large = "./assets/logo.svg"
                     brand_color: None,
                     default_prompt: None,
                 }),
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -821,6 +871,7 @@ brand_color = "blue"
                 description: "from toml".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -869,6 +920,7 @@ default_prompt = "{too_long}"
                     brand_color: None,
                     default_prompt: None,
                 }),
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -905,6 +957,7 @@ icon_large = "./assets/../logo.svg"
                 description: "from toml".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -947,6 +1000,7 @@ icon_large = "./assets/../logo.svg"
                 description: "from link".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&shared_skill_path),
                 scope: SkillScope::User,
             }]
@@ -1005,6 +1059,7 @@ icon_large = "./assets/../logo.svg"
                 description: "still loads".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -1039,6 +1094,7 @@ icon_large = "./assets/../logo.svg"
                 description: "from link".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&shared_skill_path),
                 scope: SkillScope::Admin,
             }]
@@ -1077,6 +1133,7 @@ icon_large = "./assets/../logo.svg"
                 description: "from link".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&linked_skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -1138,6 +1195,7 @@ icon_large = "./assets/../logo.svg"
                 description: "loads".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&within_depth_path),
                 scope: SkillScope::User,
             }]
@@ -1163,6 +1221,7 @@ icon_large = "./assets/../logo.svg"
                 description: "does things carefully".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -1192,6 +1251,7 @@ icon_large = "./assets/../logo.svg"
                 description: "long description".to_string(),
                 short_description: Some("short summary".to_string()),
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -1302,6 +1362,7 @@ icon_large = "./assets/../logo.svg"
                 description: "from repo".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -1353,6 +1414,7 @@ icon_large = "./assets/../logo.svg"
                     description: "from nested".to_string(),
                     short_description: None,
                     interface: None,
+                    dependencies: Vec::new(),
                     path: normalized(&nested_skill_path),
                     scope: SkillScope::Repo,
                 },
@@ -1361,6 +1423,7 @@ icon_large = "./assets/../logo.svg"
                     description: "from root".to_string(),
                     short_description: None,
                     interface: None,
+                    dependencies: Vec::new(),
                     path: normalized(&root_skill_path),
                     scope: SkillScope::Repo,
                 },
@@ -1398,6 +1461,7 @@ icon_large = "./assets/../logo.svg"
                 description: "from cwd".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -1433,6 +1497,7 @@ icon_large = "./assets/../logo.svg"
                 description: "from repo".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -1472,6 +1537,7 @@ icon_large = "./assets/../logo.svg"
                     description: "from repo".to_string(),
                     short_description: None,
                     interface: None,
+                    dependencies: Vec::new(),
                     path: normalized(&repo_skill_path),
                     scope: SkillScope::Repo,
                 },
@@ -1480,6 +1546,7 @@ icon_large = "./assets/../logo.svg"
                     description: "from user".to_string(),
                     short_description: None,
                     interface: None,
+                    dependencies: Vec::new(),
                     path: normalized(&user_skill_path),
                     scope: SkillScope::User,
                 },
@@ -1542,6 +1609,7 @@ icon_large = "./assets/../logo.svg"
                     description: first_description.to_string(),
                     short_description: None,
                     interface: None,
+                    dependencies: Vec::new(),
                     path: first_path,
                     scope: SkillScope::Repo,
                 },
@@ -1550,6 +1618,7 @@ icon_large = "./assets/../logo.svg"
                     description: second_description.to_string(),
                     short_description: None,
                     interface: None,
+                    dependencies: Vec::new(),
                     path: second_path,
                     scope: SkillScope::Repo,
                 },
@@ -1619,6 +1688,7 @@ icon_large = "./assets/../logo.svg"
                 description: "from repo".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -1675,6 +1745,7 @@ icon_large = "./assets/../logo.svg"
                 description: "from system".to_string(),
                 short_description: None,
                 interface: None,
+                dependencies: Vec::new(),
                 path: normalized(&skill_path),
                 scope: SkillScope::System,
             }]

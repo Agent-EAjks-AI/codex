@@ -1,15 +1,24 @@
-pub mod injection;
+mod dependencies;
+mod dependency_flow;
+mod env_store;
 pub mod loader;
 pub mod manager;
 pub mod model;
+pub mod prepare_turn;
 pub mod render;
 pub mod system;
 
-pub(crate) use injection::SkillInjections;
-pub(crate) use injection::build_skill_injections;
+pub(crate) use dependencies::SkillDependencyInfo;
+pub(crate) use dependencies::SkillDependencyResponse;
+pub(crate) use dependency_flow::handle_skill_dependency_response;
+pub(crate) use dependency_flow::resolve_skill_dependencies_for_turn;
+pub(crate) use env_store::load_env_var;
+pub(crate) use env_store::save_env_var;
 pub use loader::load_skills;
 pub use manager::SkillsManager;
 pub use model::SkillError;
 pub use model::SkillLoadOutcome;
 pub use model::SkillMetadata;
+pub(crate) use prepare_turn::SkillTurnPrep;
+pub(crate) use prepare_turn::build_skill_turn_prep;
 pub use render::render_skills_section;

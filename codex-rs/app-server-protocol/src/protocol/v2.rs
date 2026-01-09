@@ -1720,6 +1720,9 @@ pub enum UserInput {
     Skill {
         name: String,
         path: PathBuf,
+        #[serde(default)]
+        // Experimental; subject to change.
+        validate_dependencies: bool,
     },
 }
 
@@ -1735,7 +1738,15 @@ impl UserInput {
             },
             UserInput::Image { url } => CoreUserInput::Image { image_url: url },
             UserInput::LocalImage { path } => CoreUserInput::LocalImage { path },
-            UserInput::Skill { name, path } => CoreUserInput::Skill { name, path },
+            UserInput::Skill {
+                name,
+                path,
+                validate_dependencies,
+            } => CoreUserInput::Skill {
+                name,
+                path,
+                validate_dependencies,
+            },
         }
     }
 }
@@ -1752,7 +1763,15 @@ impl From<CoreUserInput> for UserInput {
             },
             CoreUserInput::Image { image_url } => UserInput::Image { url: image_url },
             CoreUserInput::LocalImage { path } => UserInput::LocalImage { path },
-            CoreUserInput::Skill { name, path } => UserInput::Skill { name, path },
+            CoreUserInput::Skill {
+                name,
+                path,
+                validate_dependencies,
+            } => UserInput::Skill {
+                name,
+                path,
+                validate_dependencies,
+            },
             _ => unreachable!("unsupported user input variant"),
         }
     }
@@ -2342,6 +2361,34 @@ pub struct ToolRequestUserInputResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct SkillDependency {
+    #[serde(rename = "type")]
+    pub dependency_type: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SkillDependencyRequestParams {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub request_id: String,
+    pub skill_name: String,
+    pub dependencies: Vec<SkillDependency>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SkillDependencyRequestResponse {
+    pub values: HashMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct AccountRateLimitsUpdatedNotification {
     pub rate_limits: RateLimitSnapshot,
 }
@@ -2489,6 +2536,7 @@ mod tests {
                 CoreUserInput::Skill {
                     name: "skill-creator".to_string(),
                     path: PathBuf::from("/repo/.codex/skills/skill-creator/SKILL.md"),
+                    validate_dependencies: false,
                 },
             ],
         });
@@ -2511,6 +2559,7 @@ mod tests {
                     UserInput::Skill {
                         name: "skill-creator".to_string(),
                         path: PathBuf::from("/repo/.codex/skills/skill-creator/SKILL.md"),
+                        validate_dependencies: false,
                     },
                 ],
             }

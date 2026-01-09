@@ -3,12 +3,15 @@ use std::path::PathBuf;
 
 use codex_protocol::protocol::SkillScope;
 
+use crate::skills::dependencies::SkillDependency;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillMetadata {
     pub name: String,
     pub description: String,
     pub short_description: Option<String>,
     pub interface: Option<SkillInterface>,
+    pub dependencies: Vec<SkillDependency>,
     pub path: PathBuf,
     pub scope: SkillScope,
 }

@@ -7,6 +7,7 @@ use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::McpToolCallBeginEvent;
 use codex_core::protocol::McpToolCallEndEvent;
 use codex_core::protocol::PatchApplyEndEvent;
+use codex_core::protocol::SkillDependencyRequestEvent;
 use codex_protocol::approvals::ElicitationRequestEvent;
 
 use super::ChatWidget;
@@ -16,6 +17,7 @@ pub(crate) enum QueuedInterrupt {
     ExecApproval(String, ExecApprovalRequestEvent),
     ApplyPatchApproval(String, ApplyPatchApprovalRequestEvent),
     Elicitation(ElicitationRequestEvent),
+    SkillDependency(SkillDependencyRequestEvent),
     ExecBegin(ExecCommandBeginEvent),
     ExecEnd(ExecCommandEndEvent),
     McpBegin(McpToolCallBeginEvent),
@@ -57,6 +59,10 @@ impl InterruptManager {
         self.queue.push_back(QueuedInterrupt::Elicitation(ev));
     }
 
+    pub(crate) fn push_skill_dependencies(&mut self, ev: SkillDependencyRequestEvent) {
+        self.queue.push_back(QueuedInterrupt::SkillDependency(ev));
+    }
+
     pub(crate) fn push_exec_begin(&mut self, ev: ExecCommandBeginEvent) {
         self.queue.push_back(QueuedInterrupt::ExecBegin(ev));
     }
@@ -85,6 +91,9 @@ impl InterruptManager {
                     chat.handle_apply_patch_approval_now(id, ev)
                 }
                 QueuedInterrupt::Elicitation(ev) => chat.handle_elicitation_request_now(ev),
+                QueuedInterrupt::SkillDependency(ev) => {
+                    chat.handle_skill_dependency_request_now(ev)
+                }
                 QueuedInterrupt::ExecBegin(ev) => chat.handle_exec_begin_now(ev),
                 QueuedInterrupt::ExecEnd(ev) => chat.handle_exec_end_now(ev),
                 QueuedInterrupt::McpBegin(ev) => chat.handle_mcp_begin_now(ev),

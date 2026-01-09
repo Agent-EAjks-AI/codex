@@ -140,11 +140,13 @@ use crate::rollout::RolloutRecorderParams;
 use crate::rollout::map_session_init_error;
 use crate::shell;
 use crate::shell_snapshot::ShellSnapshot;
+use crate::skills::SkillDependencyResponse;
 use crate::skills::SkillError;
-use crate::skills::SkillInjections;
 use crate::skills::SkillMetadata;
+use crate::skills::SkillTurnPrep;
 use crate::skills::SkillsManager;
-use crate::skills::build_skill_injections;
+use crate::skills::build_skill_turn_prep;
+use crate::skills::resolve_skill_dependencies_for_turn;
 use crate::state::ActiveTurn;
 use crate::state::SessionServices;
 use crate::state::SessionState;
@@ -730,7 +732,7 @@ impl Session {
                 otel_manager.clone(),
             );
         }
-        let state = SessionState::new(session_configuration.clone());
+        let state = SessionState::new(session_configuration.clone(), config.codex_home.clone());
 
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(McpConnectionManager::default())),
@@ -1392,6 +1394,50 @@ impl Session {
             None => {
                 warn!("No pending user input found for sub_id: {sub_id}");
             }
+        }
+    }
+
+    pub async fn dependency_env(&self) -> HashMap<String, String> {
+        let state = self.state.lock().await;
+        state.dependency_env()
+    }
+
+    pub async fn set_dependency_env(&self, values: HashMap<String, String>) {
+        let mut state = self.state.lock().await;
+        state.set_dependency_env(values);
+    }
+
+    pub async fn codex_home(&self) -> PathBuf {
+        let state = self.state.lock().await;
+        state.codex_home()
+    }
+
+    pub async fn insert_pending_skill_dependencies(
+        &self,
+        request_id: String,
+        tx_response: oneshot::Sender<SkillDependencyResponse>,
+    ) -> Option<oneshot::Sender<SkillDependencyResponse>> {
+        let mut active = self.active_turn.lock().await;
+        match active.as_mut() {
+            Some(at) => {
+                let mut ts = at.turn_state.lock().await;
+                ts.insert_pending_skill_dependencies(request_id, tx_response)
+            }
+            None => None,
+        }
+    }
+
+    pub async fn remove_pending_skill_dependencies(
+        &self,
+        request_id: &str,
+    ) -> Option<oneshot::Sender<SkillDependencyResponse>> {
+        let mut active = self.active_turn.lock().await;
+        match active.as_mut() {
+            Some(at) => {
+                let mut ts = at.turn_state.lock().await;
+                ts.remove_pending_skill_dependencies(request_id)
+            }
+            None => None,
         }
     }
 
@@ -2089,6 +2135,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             } => {
                 handlers::resolve_elicitation(&sess, server_name, request_id, decision).await;
             }
+            Op::ResolveSkillDependencies { id, values } => {
+                handlers::resolve_skill_dependencies(&sess, id, values).await;
+            }
             Op::Shutdown => {
                 if handlers::shutdown(&sess, sub.id.clone()).await {
                     break;
@@ -2115,6 +2164,8 @@ mod handlers {
     use crate::mcp::auth::compute_auth_statuses;
     use crate::mcp::collect_mcp_snapshot_from_manager;
     use crate::review_prompts::resolve_review_request;
+    use crate::skills::SkillDependencyResponse;
+    use crate::skills::handle_skill_dependency_response;
     use crate::tasks::CompactTask;
     use crate::tasks::RegularTask;
     use crate::tasks::UndoTask;
@@ -2143,6 +2194,7 @@ mod handlers {
     use codex_rmcp_client::ElicitationAction;
     use codex_rmcp_client::ElicitationResponse;
     use mcp_types::RequestId;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tracing::info;
@@ -2325,6 +2377,15 @@ mod handlers {
                 "failed to resolve elicitation request in session"
             );
         }
+    }
+
+    pub async fn resolve_skill_dependencies(
+        sess: &Arc<Session>,
+        request_id: String,
+        values: HashMap<String, String>,
+    ) {
+        handle_skill_dependency_response(sess, &request_id, SkillDependencyResponse { values })
+            .await;
     }
 
     /// Propagate a user's exec approval decision to the session.
@@ -2807,10 +2868,11 @@ pub(crate) async fn run_turn(
     );
 
     let otel_manager = turn_context.client.get_otel_manager();
-    let SkillInjections {
+    let SkillTurnPrep {
         items: skill_items,
+        dependencies: skill_dependencies,
         warnings: skill_warnings,
-    } = build_skill_injections(&input, skills_outcome.as_ref(), Some(&otel_manager)).await;
+    } = build_skill_turn_prep(&input, skills_outcome.as_ref(), Some(&otel_manager)).await;
 
     for message in skill_warnings {
         sess.send_event(&turn_context, EventMsg::Warning(WarningEvent { message }))
@@ -2821,6 +2883,8 @@ pub(crate) async fn run_turn(
     let response_item: ResponseItem = initial_input_for_turn.clone().into();
     sess.record_user_prompt_and_emit_turn_item(turn_context.as_ref(), &input, response_item)
         .await;
+
+    resolve_skill_dependencies_for_turn(&sess, &turn_context, &skill_dependencies).await;
 
     if !skill_items.is_empty() {
         sess.record_conversation_items(&turn_context, &skill_items)
@@ -3739,7 +3803,7 @@ mod tests {
             session_source: SessionSource::Exec,
         };
 
-        let mut state = SessionState::new(session_configuration);
+        let mut state = SessionState::new(session_configuration, config.codex_home.clone());
         let initial = RateLimitSnapshot {
             primary: Some(RateLimitWindow {
                 used_percent: 10.0,
@@ -3814,7 +3878,7 @@ mod tests {
             session_source: SessionSource::Exec,
         };
 
-        let mut state = SessionState::new(session_configuration);
+        let mut state = SessionState::new(session_configuration, config.codex_home.clone());
         let initial = RateLimitSnapshot {
             primary: Some(RateLimitWindow {
                 used_percent: 15.0,
@@ -4084,7 +4148,7 @@ mod tests {
             session_configuration.session_source.clone(),
         );
 
-        let state = SessionState::new(session_configuration.clone());
+        let state = SessionState::new(session_configuration.clone(), config.codex_home.clone());
         let skills_manager = Arc::new(SkillsManager::new(config.codex_home.clone()));
 
         let services = SessionServices {
@@ -4188,7 +4252,7 @@ mod tests {
             session_configuration.session_source.clone(),
         );
 
-        let state = SessionState::new(session_configuration.clone());
+        let state = SessionState::new(session_configuration.clone(), config.codex_home.clone());
         let skills_manager = Arc::new(SkillsManager::new(config.codex_home.clone()));
 
         let services = SessionServices {

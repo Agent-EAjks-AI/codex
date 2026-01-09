@@ -515,6 +515,11 @@ server_request_definitions! {
         params: v2::ToolRequestUserInputParams,
         response: v2::ToolRequestUserInputResponse,
     },
+    /// EXPERIMENTAL - Request user-provided values for skill dependencies (e.g. env vars).
+    SkillDependencyRequest => "skill/requestDependencies" {
+        params: v2::SkillDependencyRequestParams,
+        response: v2::SkillDependencyRequestResponse,
+    },
 
     /// DEPRECATED APIs below
     /// Request to approve a patch.

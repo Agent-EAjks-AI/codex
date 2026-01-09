@@ -97,6 +97,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::parse_command::ParsedCommand;
+use codex_protocol::protocol::SkillDependencyRequestEvent;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::user_input::TextElement;
 use codex_protocol::user_input::UserInput;
@@ -132,6 +133,7 @@ use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
+use crate::bottom_pane::DependencyInputView;
 use crate::bottom_pane::ExperimentalFeaturesView;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::LocalImageAttachment;
@@ -1222,6 +1224,14 @@ impl ChatWidget {
         );
     }
 
+    fn on_skill_dependency_request(&mut self, ev: SkillDependencyRequestEvent) {
+        let ev2 = ev.clone();
+        self.defer_or_handle(
+            |q| q.push_skill_dependencies(ev),
+            |s| s.handle_skill_dependency_request_now(ev2),
+        );
+    }
+
     fn on_exec_command_begin(&mut self, ev: ExecCommandBeginEvent) {
         self.flush_answer_stream_with_separator();
         if is_unified_exec_source(ev.source) {
@@ -1693,6 +1703,19 @@ impl ChatWidget {
     pub(crate) fn handle_request_user_input_now(&mut self, ev: RequestUserInputEvent) {
         self.flush_answer_stream_with_separator();
         self.bottom_pane.push_user_input_request(ev);
+        self.request_redraw();
+    }
+
+    pub(crate) fn handle_skill_dependency_request_now(&mut self, ev: SkillDependencyRequestEvent) {
+        self.flush_answer_stream_with_separator();
+
+        let view = DependencyInputView::new(
+            ev.id,
+            ev.skill_name,
+            ev.dependencies,
+            self.app_event_tx.clone(),
+        );
+        self.bottom_pane.show_view(Box::new(view));
         self.request_redraw();
     }
 
@@ -2569,6 +2592,7 @@ impl ChatWidget {
                 items.push(UserInput::Skill {
                     name: skill.name.clone(),
                     path: skill.path.clone(),
+                    validate_dependencies: true,
                 });
             }
         }
@@ -2706,6 +2730,9 @@ impl ChatWidget {
             }
             EventMsg::RequestUserInput(ev) => {
                 self.on_request_user_input(ev);
+            }
+            EventMsg::SkillDependencyRequest(ev) => {
+                self.on_skill_dependency_request(ev);
             }
             EventMsg::ExecCommandBegin(ev) => self.on_exec_command_begin(ev),
             EventMsg::TerminalInteraction(delta) => self.on_terminal_interaction(delta),
@@ -5054,6 +5081,7 @@ fn skills_for_cwd(cwd: &Path, skills_entries: &[SkillsListEntry]) -> Vec<SkillMe
                         brand_color: interface.brand_color,
                         default_prompt: interface.default_prompt,
                     }),
+                    dependencies: Vec::new(),
                     path: skill.path.clone(),
                     scope: skill.scope,
                 })

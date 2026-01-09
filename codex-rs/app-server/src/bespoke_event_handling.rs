@@ -49,6 +49,9 @@ use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
 use codex_app_server_protocol::ReasoningTextDeltaNotification;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
+use codex_app_server_protocol::SkillDependency;
+use codex_app_server_protocol::SkillDependencyRequestParams;
+use codex_app_server_protocol::SkillDependencyRequestResponse;
 use codex_app_server_protocol::TerminalInteractionNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadRollbackResponse;
@@ -198,6 +201,46 @@ pub(crate) async fn apply_bespoke_event_handling(
                 });
             }
         },
+        EventMsg::SkillDependencyRequest(ev) => {
+            let request_id = ev.id.clone();
+            if matches!(api_version, ApiVersion::V2) {
+                let dependencies = ev
+                    .dependencies
+                    .into_iter()
+                    .map(|dependency| SkillDependency {
+                        dependency_type: dependency.dependency_type,
+                        name: dependency.name,
+                        description: dependency.description,
+                    })
+                    .collect();
+                let params = SkillDependencyRequestParams {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: ev.turn_id,
+                    request_id: ev.id,
+                    skill_name: ev.skill_name,
+                    dependencies,
+                };
+                let rx = outgoing
+                    .send_request(ServerRequestPayload::SkillDependencyRequest(params))
+                    .await;
+                tokio::spawn(async move {
+                    on_skill_dependency_response(request_id, rx, conversation).await;
+                });
+            } else {
+                error!(
+                    "skill dependency requests are only supported on api v2 (request_id: {request_id})"
+                );
+                if let Err(err) = conversation
+                    .submit(Op::ResolveSkillDependencies {
+                        id: request_id,
+                        values: HashMap::new(),
+                    })
+                    .await
+                {
+                    error!("failed to submit ResolveSkillDependencies: {err}");
+                }
+            }
+        }
         EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
             call_id,
             turn_id,
@@ -1461,6 +1504,48 @@ async fn on_request_user_input_response(
         .await
     {
         error!("failed to submit UserInputAnswer: {err}");
+    }
+}
+
+async fn on_skill_dependency_response(
+    request_id: String,
+    receiver: oneshot::Receiver<JsonValue>,
+    conversation: Arc<CodexThread>,
+) {
+    let response = receiver.await;
+    let value = match response {
+        Ok(value) => value,
+        Err(err) => {
+            error!("request failed: {err:?}");
+            if let Err(err) = conversation
+                .submit(Op::ResolveSkillDependencies {
+                    id: request_id,
+                    values: HashMap::new(),
+                })
+                .await
+            {
+                error!("failed to submit ResolveSkillDependencies: {err}");
+            }
+            return;
+        }
+    };
+
+    let response =
+        serde_json::from_value::<SkillDependencyRequestResponse>(value).unwrap_or_else(|err| {
+            error!("failed to deserialize SkillDependencyRequestResponse: {err}");
+            SkillDependencyRequestResponse {
+                values: HashMap::new(),
+            }
+        });
+
+    if let Err(err) = conversation
+        .submit(Op::ResolveSkillDependencies {
+            id: request_id,
+            values: response.values,
+        })
+        .await
+    {
+        error!("failed to submit ResolveSkillDependencies: {err}");
     }
 }
 

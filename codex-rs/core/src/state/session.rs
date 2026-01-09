@@ -1,5 +1,8 @@
 //! Session-wide mutable state.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use codex_protocol::models::ResponseItem;
 
 use crate::codex::SessionConfiguration;
@@ -15,18 +18,36 @@ pub(crate) struct SessionState {
     pub(crate) history: ContextManager,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) server_reasoning_included: bool,
+    pub(crate) dependency_env: HashMap<String, String>,
+    codex_home: PathBuf,
 }
 
 impl SessionState {
     /// Create a new session state mirroring previous `State::default()` semantics.
-    pub(crate) fn new(session_configuration: SessionConfiguration) -> Self {
+    pub(crate) fn new(session_configuration: SessionConfiguration, codex_home: PathBuf) -> Self {
         let history = ContextManager::new();
         Self {
             session_configuration,
             history,
             latest_rate_limits: None,
             server_reasoning_included: false,
+            dependency_env: HashMap::new(),
+            codex_home,
         }
+    }
+
+    pub(crate) fn set_dependency_env(&mut self, values: HashMap<String, String>) {
+        for (key, value) in values {
+            self.dependency_env.insert(key, value);
+        }
+    }
+
+    pub(crate) fn dependency_env(&self) -> HashMap<String, String> {
+        self.dependency_env.clone()
+    }
+
+    pub(crate) fn codex_home(&self) -> PathBuf {
+        self.codex_home.clone()
     }
 
     // History helpers

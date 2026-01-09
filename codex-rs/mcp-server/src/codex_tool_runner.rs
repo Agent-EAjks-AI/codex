@@ -355,6 +355,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::AgentMessageContentDelta(_)
                     | EventMsg::ReasoningContentDelta(_)
                     | EventMsg::ReasoningRawContentDelta(_)
+                    | EventMsg::SkillDependencyRequest(_)
                     | EventMsg::SkillsUpdateAvailable
                     | EventMsg::UndoStarted(_)
                     | EventMsg::UndoCompleted(_)

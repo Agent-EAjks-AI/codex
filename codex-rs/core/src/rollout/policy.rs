@@ -70,6 +70,7 @@ pub(crate) fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::RequestUserInput(_)
         | EventMsg::ElicitationRequest(_)
         | EventMsg::ApplyPatchApprovalRequest(_)
+        | EventMsg::SkillDependencyRequest(_)
         | EventMsg::BackgroundEvent(_)
         | EventMsg::StreamError(_)
         | EventMsg::PatchApplyBegin(_)

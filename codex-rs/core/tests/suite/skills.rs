@@ -69,6 +69,7 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
                 UserInput::Skill {
                     name: "demo".to_string(),
                     path: skill_path.clone(),
+                    validate_dependencies: false,
                 },
             ],
             final_output_json_schema: None,
