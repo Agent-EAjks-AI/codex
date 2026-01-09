@@ -84,8 +84,9 @@ mod tests {
         );
         assert_parsed(
             &shlex_split_safe("git grep -l TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "git grep -l TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
@@ -213,39 +214,44 @@ mod tests {
     }
 
     #[test]
-    fn rg_files_with_matches_flags_list_files() {
+    fn rg_files_with_matches_flags_are_search() {
         assert_parsed(
             &shlex_split_safe("rg -l TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "rg -l TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
         assert_parsed(
             &shlex_split_safe("rg --files-with-matches TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "rg --files-with-matches TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
         assert_parsed(
             &shlex_split_safe("rg -L TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "rg -L TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
         assert_parsed(
             &shlex_split_safe("rg --files-without-match TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "rg --files-without-match TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
         assert_parsed(
             &shlex_split_safe("rga -l TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "rga -l TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
@@ -337,6 +343,30 @@ mod tests {
                 cmd: "cat foo.txt".to_string(),
                 name: "foo.txt".to_string(),
                 path: PathBuf::from("foo/foo.txt"),
+            }],
+        );
+    }
+
+    #[test]
+    fn cd_with_double_dash_then_cat_is_read() {
+        assert_parsed(
+            &shlex_split_safe("cd -- -weird && cat foo.txt"),
+            vec![ParsedCommand::Read {
+                cmd: "cat foo.txt".to_string(),
+                name: "foo.txt".to_string(),
+                path: PathBuf::from("-weird/foo.txt"),
+            }],
+        );
+    }
+
+    #[test]
+    fn cd_with_multiple_operands_uses_last() {
+        assert_parsed(
+            &shlex_split_safe("cd dir1 dir2 && cat foo.txt"),
+            vec![ParsedCommand::Read {
+                cmd: "cat foo.txt".to_string(),
+                name: "foo.txt".to_string(),
+                path: PathBuf::from("dir2/foo.txt"),
             }],
         );
     }
@@ -539,40 +569,45 @@ mod tests {
         );
         assert_parsed(
             &shlex_split_safe("fgrep -l TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "fgrep -l TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
     }
 
     #[test]
-    fn grep_files_with_matches_flags_list_files() {
+    fn grep_files_with_matches_flags_are_search() {
         assert_parsed(
             &shlex_split_safe("grep -l TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "grep -l TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
         assert_parsed(
             &shlex_split_safe("grep --files-with-matches TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "grep --files-with-matches TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
         assert_parsed(
             &shlex_split_safe("grep -L TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "grep -L TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
         assert_parsed(
             &shlex_split_safe("grep --files-without-match TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "grep --files-without-match TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
@@ -739,6 +774,12 @@ mod tests {
         // Valid range with file -> not small formatting
         assert!(!is_small_formatting_command(&shlex_split_safe(
             "sed -n 10p file.txt"
+        )));
+        assert!(!is_small_formatting_command(&shlex_split_safe(
+            "sed -n -e 10p file.txt"
+        )));
+        assert!(!is_small_formatting_command(&shlex_split_safe(
+            "sed -n 10p -- file.txt"
         )));
         assert!(!is_small_formatting_command(&shlex_split_safe(
             "sed -n 1,200p file.txt"
@@ -1081,25 +1122,28 @@ mod tests {
     }
 
     #[test]
-    fn ag_ack_pt_files_with_matches_flags_list_files() {
+    fn ag_ack_pt_files_with_matches_flags_are_search() {
         assert_parsed(
             &shlex_split_safe("ag -l TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "ag -l TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
         assert_parsed(
             &shlex_split_safe("ack -l TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "ack -l TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
         assert_parsed(
             &shlex_split_safe("pt -l TODO src"),
-            vec![ParsedCommand::ListFiles {
+            vec![ParsedCommand::Search {
                 cmd: "pt -l TODO src".to_string(),
+                query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
             }],
         );
@@ -1297,7 +1341,7 @@ pub fn parse_command_impl(command: &[String]) -> Vec<ParsedCommand> {
         if let Some((head, tail)) = tokens.split_first()
             && head == "cd"
         {
-            if let Some(dir) = tail.first() {
+            if let Some(dir) = cd_target(tail) {
                 cwd = Some(match &cwd {
                     Some(base) => join_paths(base, dir),
                     None => dir.clone(),
@@ -1409,6 +1453,49 @@ fn is_valid_sed_n_arg(arg: Option<&str>) -> bool {
                 && b.chars().all(|c| c.is_ascii_digit())
         }
         _ => false,
+    }
+}
+
+fn sed_read_path(args: &[String]) -> Option<String> {
+    let args_no_connector = trim_at_connector(args);
+    if !args_no_connector.iter().any(|arg| arg == "-n") {
+        return None;
+    }
+    let mut has_range_script = false;
+    let mut i = 0;
+    while i < args_no_connector.len() {
+        let arg = &args_no_connector[i];
+        if matches!(arg.as_str(), "-e" | "--expression") {
+            if is_valid_sed_n_arg(args_no_connector.get(i + 1).map(String::as_str)) {
+                has_range_script = true;
+            }
+            i += 2;
+            continue;
+        }
+        if matches!(arg.as_str(), "-f" | "--file") {
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    if !has_range_script {
+        has_range_script = args_no_connector
+            .iter()
+            .any(|arg| !arg.starts_with('-') && is_valid_sed_n_arg(Some(arg)));
+    }
+    if !has_range_script {
+        return None;
+    }
+    let candidates = skip_flag_values(&args_no_connector, &["-e", "-f", "--expression", "--file"]);
+    let non_flags: Vec<String> = candidates
+        .into_iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .cloned()
+        .collect();
+    match non_flags.as_slice() {
+        [] => None,
+        [first, rest @ ..] if is_valid_sed_n_arg(Some(first)) => rest.first().cloned(),
+        [first, ..] => Some(first.clone()),
     }
 }
 
@@ -1534,18 +1621,8 @@ fn single_non_flag_operand(args: &[String], flags_with_vals: &[&str]) -> Option<
     Some(first.clone())
 }
 
-fn has_files_with_matches_flag(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "-l" | "-L" | "--files-with-matches" | "--files-without-match"
-        )
-    })
-}
-
 fn parse_grep_like(main_cmd: &[String], args: &[String]) -> ParsedCommand {
     let args_no_connector = trim_at_connector(args);
-    let has_files_with_matches = has_files_with_matches_flag(&args_no_connector);
     let non_flags: Vec<&String> = args_no_connector
         .iter()
         .filter(|p| !p.starts_with('-'))
@@ -1554,17 +1631,10 @@ fn parse_grep_like(main_cmd: &[String], args: &[String]) -> ParsedCommand {
     // and should be preserved verbatim. Only paths should be shortened.
     let query = non_flags.first().cloned().map(String::from);
     let path = non_flags.get(1).map(|s| short_display_path(s));
-    if has_files_with_matches {
-        ParsedCommand::ListFiles {
-            cmd: shlex_join(main_cmd),
-            path,
-        }
-    } else {
-        ParsedCommand::Search {
-            cmd: shlex_join(main_cmd),
-            query,
-            path,
-        }
+    ParsedCommand::Search {
+        cmd: shlex_join(main_cmd),
+        query,
+        path,
     }
 }
 
@@ -1618,6 +1688,31 @@ fn is_python_command(cmd: &str) -> bool {
         || cmd == "python3"
         || cmd.starts_with("python2.")
         || cmd.starts_with("python3.")
+}
+
+fn cd_target(args: &[String]) -> Option<String> {
+    if args.is_empty() {
+        return None;
+    }
+    let mut i = 0;
+    let mut target: Option<String> = None;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            return args.get(i + 1).cloned();
+        }
+        if matches!(arg.as_str(), "-L" | "-P") {
+            i += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        target = Some(arg.clone());
+        i += 1;
+    }
+    target
 }
 
 fn is_pathish(s: &str) -> bool {
@@ -1715,7 +1810,7 @@ fn parse_shell_lc_commands(original: &[String]) -> Option<Vec<ParsedCommand>> {
             if let Some((head, tail)) = tokens.split_first()
                 && head == "cd"
             {
-                if let Some(dir) = tail.first() {
+                if let Some(dir) = cd_target(tail) {
                     cwd = Some(match &cwd {
                         Some(base) => join_paths(base, dir),
                         None => dir.clone(),
@@ -1885,8 +1980,7 @@ fn is_small_formatting_command(tokens: &[String]) -> bool {
         "sed" => {
             // Keep `sed -n <range> file` (treated as a file read elsewhere);
             // otherwise consider it a formatting helper in a pipeline.
-            tokens.len() < 4
-                || !(tokens[1] == "-n" && is_valid_sed_n_arg(tokens.get(2).map(String::as_str)))
+            sed_read_path(&tokens[1..]).is_none()
         }
         _ => false,
     }
@@ -1959,7 +2053,6 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         Some((head, tail)) if head == "rg" || head == "rga" || head == "ripgrep-all" => {
             let args_no_connector = trim_at_connector(tail);
             let has_files_flag = args_no_connector.iter().any(|a| a == "--files");
-            let has_files_with_matches = has_files_with_matches_flag(&args_no_connector);
             let candidates = skip_flag_values(
                 &args_no_connector,
                 &[
@@ -1983,12 +2076,8 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 .into_iter()
                 .filter(|p| !p.starts_with('-'))
                 .collect();
-            if has_files_flag || has_files_with_matches {
-                let path = if has_files_flag {
-                    non_flags.first().map(|s| short_display_path(s))
-                } else {
-                    non_flags.get(1).map(|s| short_display_path(s))
-                };
+            if has_files_flag {
+                let path = non_flags.first().map(|s| short_display_path(s));
                 ParsedCommand::ListFiles {
                     cmd: shlex_join(main_cmd),
                     path,
@@ -2056,7 +2145,6 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         }
         Some((head, tail)) if matches!(head.as_str(), "ag" | "ack" | "pt") => {
             let args_no_connector = trim_at_connector(tail);
-            let has_files_with_matches = has_files_with_matches_flag(&args_no_connector);
             let candidates = skip_flag_values(
                 &args_no_connector,
                 &[
@@ -2074,17 +2162,10 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 .collect();
             let query = non_flags.first().cloned().map(String::from);
             let path = non_flags.get(1).map(|s| short_display_path(s));
-            if has_files_with_matches {
-                ParsedCommand::ListFiles {
-                    cmd: shlex_join(main_cmd),
-                    path,
-                }
-            } else {
-                ParsedCommand::Search {
-                    cmd: shlex_join(main_cmd),
-                    query,
-                    path,
-                }
+            ParsedCommand::Search {
+                cmd: shlex_join(main_cmd),
+                query,
+                path,
             }
         }
         Some((head, tail)) if head == "cat" => {
@@ -2304,14 +2385,8 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 }
             }
         }
-        Some((head, tail))
-            if head == "sed"
-                && tail.len() >= 3
-                && tail[0] == "-n"
-                && is_valid_sed_n_arg(tail.get(1).map(String::as_str)) =>
-        {
-            if let Some(path) = tail.get(2) {
-                let path = path.clone();
+        Some((head, tail)) if head == "sed" => {
+            if let Some(path) = sed_read_path(tail) {
                 let name = short_display_path(&path);
                 ParsedCommand::Read {
                     cmd: shlex_join(main_cmd),
