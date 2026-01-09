@@ -1343,7 +1343,7 @@ pub fn parse_command_impl(command: &[String]) -> Vec<ParsedCommand> {
         {
             if let Some(dir) = cd_target(tail) {
                 cwd = Some(match &cwd {
-                    Some(base) => join_paths(base, dir),
+                    Some(base) => join_paths(base, &dir),
                     None => dir.clone(),
                 });
             }
@@ -1812,7 +1812,7 @@ fn parse_shell_lc_commands(original: &[String]) -> Option<Vec<ParsedCommand>> {
             {
                 if let Some(dir) = cd_target(tail) {
                     cwd = Some(match &cwd {
-                        Some(base) => join_paths(base, dir),
+                        Some(base) => join_paths(base, &dir),
                         None => dir.clone(),
                     });
                 }
