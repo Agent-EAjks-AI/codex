@@ -148,6 +148,7 @@ pub enum AskForApproval {
     UnlessTrusted,
     OnFailure,
     OnRequest,
+    OnRequestRule,
     Never,
 }
 
@@ -157,6 +158,7 @@ impl AskForApproval {
             AskForApproval::UnlessTrusted => CoreAskForApproval::UnlessTrusted,
             AskForApproval::OnFailure => CoreAskForApproval::OnFailure,
             AskForApproval::OnRequest => CoreAskForApproval::OnRequest,
+            AskForApproval::OnRequestRule => CoreAskForApproval::OnRequestRule,
             AskForApproval::Never => CoreAskForApproval::Never,
         }
     }
@@ -168,6 +170,7 @@ impl From<CoreAskForApproval> for AskForApproval {
             CoreAskForApproval::UnlessTrusted => AskForApproval::UnlessTrusted,
             CoreAskForApproval::OnFailure => AskForApproval::OnFailure,
             CoreAskForApproval::OnRequest => AskForApproval::OnRequest,
+            CoreAskForApproval::OnRequestRule => AskForApproval::OnRequestRule,
             CoreAskForApproval::Never => AskForApproval::Never,
         }
     }
