@@ -67,9 +67,9 @@ const DEFAULT_PROJECT_ROOT_MARKERS: &[&str] = &[".git"];
 /// - admin:    managed preferences (*)
 /// - system    `/etc/codex/config.toml`
 /// - user      `${CODEX_HOME}/config.toml`
-/// - cwd       `${PWD}/config.toml` (only when the directory is trusted)
-/// - tree      parent directories up to root looking for `./.codex/config.toml` (trusted only)
-/// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml` (trusted only)
+/// - cwd       `${PWD}/config.toml` (loaded but disabled when the directory is untrusted)
+/// - tree      parent directories up to root looking for `./.codex/config.toml` (loaded but disabled when untrusted)
+/// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml` (loaded but disabled when untrusted)
 /// - runtime   e.g., --config flags, model selector in UI
 ///
 /// (*) Only available on macOS via managed device profiles.
@@ -173,12 +173,21 @@ pub async fn load_config_layers_state(
 
         let project_root_markers = project_root_markers_from_config(&merged_so_far)?
             .unwrap_or_else(default_project_root_markers);
-        if let Some(project_root) =
-            trusted_project_root(&merged_so_far, &cwd, &project_root_markers, codex_home).await?
-        {
-            let project_layers = load_project_layers(&cwd, &project_root).await?;
-            layers.extend(project_layers);
-        }
+        let project_trust_context = project_trust_context(
+            &merged_so_far,
+            &cwd,
+            &project_root_markers,
+            codex_home,
+            &user_file,
+        )
+        .await?;
+        let project_layers = load_project_layers(
+            &cwd,
+            &project_trust_context.project_root,
+            &project_trust_context,
+        )
+        .await?;
+        layers.extend(project_layers);
     }
 
     // Add a layer for runtime overrides from the CLI or UI, if any exist.
@@ -402,12 +411,63 @@ fn default_project_root_markers() -> Vec<String> {
         .collect()
 }
 
-async fn trusted_project_root(
+struct ProjectTrustContext {
+    project_root: AbsolutePathBuf,
+    trust_level: Option<TrustLevel>,
+    trust_target: AbsolutePathBuf,
+    user_config_file: AbsolutePathBuf,
+}
+
+impl ProjectTrustContext {
+    fn disabled_reason_for(&self, dot_codex_folder: &AbsolutePathBuf) -> Option<String> {
+        if matches!(self.trust_level, Some(TrustLevel::Trusted)) {
+            return None;
+        }
+
+        let trust_state = if matches!(self.trust_level, Some(TrustLevel::Untrusted)) {
+            "marked untrusted"
+        } else {
+            "not trusted yet"
+        };
+        Some(format!(
+            "Config under {} is disabled because this folder is {}. To trust it, add:\n\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n\nin {} (or accept the trust prompt), then restart.",
+            dot_codex_folder.as_path().display(),
+            trust_state,
+            self.trust_target.as_path().display(),
+            self.user_config_file.as_path().display(),
+        ))
+    }
+}
+
+fn project_layer_entry(
+    trust_context: &ProjectTrustContext,
+    dot_codex_folder: &AbsolutePathBuf,
+    config: TomlValue,
+) -> ConfigLayerEntry {
+    match trust_context.disabled_reason_for(dot_codex_folder) {
+        Some(reason) => ConfigLayerEntry::new_disabled(
+            ConfigLayerSource::Project {
+                dot_codex_folder: dot_codex_folder.clone(),
+            },
+            config,
+            reason,
+        ),
+        None => ConfigLayerEntry::new(
+            ConfigLayerSource::Project {
+                dot_codex_folder: dot_codex_folder.clone(),
+            },
+            config,
+        ),
+    }
+}
+
+async fn project_trust_context(
     merged_config: &TomlValue,
     cwd: &AbsolutePathBuf,
     project_root_markers: &[String],
     config_base_dir: &Path,
-) -> io::Result<Option<AbsolutePathBuf>> {
+    user_config_file: &AbsolutePathBuf,
+) -> io::Result<ProjectTrustContext> {
     let config_toml = deserialize_config_toml_with_base(merged_config.clone(), config_base_dir)?;
 
     let project_root = find_project_root(cwd, project_root_markers).await?;
@@ -415,7 +475,9 @@ async fn trusted_project_root(
 
     let cwd_key = cwd.as_path().to_string_lossy().to_string();
     let project_root_key = project_root.as_path().to_string_lossy().to_string();
-    let repo_root_key = resolve_root_git_project_for_trust(cwd.as_path())
+    let repo_root = resolve_root_git_project_for_trust(cwd.as_path());
+    let repo_root_key = repo_root
+        .as_ref()
         .map(|root| root.to_string_lossy().to_string());
 
     let trust_level = projects
@@ -433,11 +495,17 @@ async fn trusted_project_root(
                 .and_then(|project| project.trust_level)
         });
 
-    if matches!(trust_level, Some(TrustLevel::Trusted)) {
-        Ok(Some(project_root))
-    } else {
-        Ok(None)
-    }
+    let trust_target = repo_root
+        .as_ref()
+        .and_then(|root| AbsolutePathBuf::from_absolute_path(root).ok())
+        .unwrap_or_else(|| project_root.clone());
+
+    Ok(ProjectTrustContext {
+        project_root,
+        trust_level,
+        trust_target,
+        user_config_file: user_config_file.clone(),
+    })
 }
 
 /// Takes a `toml::Value` parsed from a config.toml file and walks through it,
@@ -527,6 +595,7 @@ async fn find_project_root(
 async fn load_project_layers(
     cwd: &AbsolutePathBuf,
     project_root: &AbsolutePathBuf,
+    trust_context: &ProjectTrustContext,
 ) -> io::Result<Vec<ConfigLayerEntry>> {
     let mut dirs = cwd
         .as_path()
@@ -570,22 +639,17 @@ async fn load_project_layers(
                 })?;
                 let config =
                     resolve_relative_paths_in_config_toml(config, dot_codex_abs.as_path())?;
-                layers.push(ConfigLayerEntry::new(
-                    ConfigLayerSource::Project {
-                        dot_codex_folder: dot_codex_abs,
-                    },
-                    config,
-                ));
+                let entry = project_layer_entry(trust_context, &dot_codex_abs, config);
+                layers.push(entry);
             }
             Err(err) => {
                 if err.kind() == io::ErrorKind::NotFound {
                     // If there is no config.toml file, record an empty entry
                     // for this project layer, as this may still have subfolders
                     // that are significant in the overall ConfigLayerStack.
-                    layers.push(ConfigLayerEntry::new(
-                        ConfigLayerSource::Project {
-                            dot_codex_folder: dot_codex_abs,
-                        },
+                    layers.push(project_layer_entry(
+                        trust_context,
+                        &dot_codex_abs,
                         TomlValue::Table(toml::map::Map::new()),
                     ));
                 } else {
