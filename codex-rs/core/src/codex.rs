@@ -411,6 +411,7 @@ pub(crate) struct TurnContext {
     /// the model as well as sandbox policies are resolved against this path
     /// instead of `std::env::current_dir()`.
     pub(crate) cwd: PathBuf,
+    pub(crate) collaboration_mode: CollaborationMode,
     pub(crate) developer_instructions: Option<String>,
     pub(crate) compact_prompt: Option<String>,
     pub(crate) user_instructions: Option<String>,
@@ -562,6 +563,7 @@ impl Session {
             sub_id,
             client,
             cwd: session_configuration.cwd.clone(),
+            collaboration_mode: session_configuration.collaboration_mode.clone(),
             developer_instructions: session_configuration.developer_instructions.clone(),
             compact_prompt: session_configuration.compact_prompt.clone(),
             user_instructions: session_configuration.user_instructions.clone(),
@@ -1052,11 +1054,6 @@ impl Session {
         };
         self.new_turn_from_configuration(sub_id, session_configuration, None, false)
             .await
-    }
-
-    pub(crate) async fn current_collaboration_mode(&self) -> CollaborationMode {
-        let state = self.state.lock().await;
-        state.session_configuration.collaboration_mode.clone()
     }
 
     fn build_environment_update_item(
@@ -2692,6 +2689,7 @@ async fn spawn_review_thread(
         client,
         tools_config,
         ghost_snapshot: parent_turn_context.ghost_snapshot.clone(),
+        collaboration_mode: parent_turn_context.collaboration_mode.clone(),
         developer_instructions: None,
         user_instructions: None,
         compact_prompt: parent_turn_context.compact_prompt.clone(),
@@ -3088,13 +3086,12 @@ async fn try_run_sampling_request(
     prompt: &Prompt,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
-    let collaboration_mode = sess.current_collaboration_mode().await;
     let rollout_item = RolloutItem::TurnContext(TurnContextItem {
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy,
         sandbox_policy: turn_context.sandbox_policy.clone(),
         model: turn_context.client.get_model(),
-        collaboration_mode: Some(collaboration_mode),
+        collaboration_mode: Some(turn_context.collaboration_mode.clone()),
         effort: turn_context.client.get_reasoning_effort(),
         summary: turn_context.client.get_reasoning_summary(),
         user_instructions: turn_context.user_instructions.clone(),
