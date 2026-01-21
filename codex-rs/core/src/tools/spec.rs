@@ -14,7 +14,6 @@ use codex_protocol::models::VIEW_IMAGE_TOOL_NAME;
 use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::protocol::AskForApproval;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -30,14 +29,12 @@ pub(crate) struct ToolsConfig {
     pub collab_tools: bool,
     pub collaboration_modes_tools: bool,
     pub experimental_supported_tools: Vec<String>,
-    pub approval_policy: AskForApproval,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
     pub(crate) model_info: &'a ModelInfo,
     pub(crate) features: &'a Features,
     pub(crate) web_search_mode: Option<WebSearchMode>,
-    pub(crate) approval_policy: AskForApproval,
 }
 
 impl ToolsConfig {
@@ -46,7 +43,6 @@ impl ToolsConfig {
             model_info,
             features,
             web_search_mode,
-            approval_policy,
         } = params;
         let include_apply_patch_tool = features.enabled(Feature::ApplyPatchFreeform);
         let include_collab_tools = features.enabled(Feature::Collab);
@@ -84,7 +80,6 @@ impl ToolsConfig {
             collab_tools: include_collab_tools,
             collaboration_modes_tools: include_collaboration_modes_tools,
             experimental_supported_tools: model_info.experimental_supported_tools.clone(),
-            approval_policy: *approval_policy,
         }
     }
 }
@@ -145,48 +140,28 @@ impl From<JsonSchema> for AdditionalProperties {
     }
 }
 
-fn create_approval_parameters(approval_policy: AskForApproval) -> BTreeMap<String, JsonSchema> {
-    if matches!(approval_policy, AskForApproval::OnRequestRule) {
-        BTreeMap::from([
-            (
-                "request_approval".to_string(),
-                JsonSchema::String {
-                    description: Some(
-                        r#"
-                    Request approval from the user to run this command outside the sandbox. 
-                    Phrased a simple question that summarizes the purpose of the 
-                    command as it relates to the task at hand - e.g. 'Do you want to 
-                    fetch and pull the latest version of this git branch?'
-                   "#
-                        .to_string(),
-                    ),
-                },
-            ),
-            (
-                "rule_prefix".to_string(),
-                JsonSchema::Array {
-                    items: Box::new(JsonSchema::String { description: None }),
-                    description: Some(
-                        r#"
-                    Only specify when escalation_request is present. Prefix pattern for 
-                    the rule to persist for this command. Should be a short but reasonable
-                    prefix, usually 2-3 arguments. e.g. [\"git\", \"pull\"] or 
-                    [\"uv\", \"run\"].
-                    "#
-                        .to_string(),
-                    ),
-                },
-            ),
-        ])
-    } else {
-        BTreeMap::from([
-
+fn create_approval_parameters() -> BTreeMap<String, JsonSchema> {
+    BTreeMap::from([
         (
             "sandbox_permissions".to_string(),
             JsonSchema::String {
                 description: Some(
                     "Sandbox permissions for the command. Set to \"require_escalated\" to request running without sandbox restrictions; defaults to \"use_default\"."
                         .to_string(),
+                ),
+            },
+        ),
+        (
+            "request_approval".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    r#"
+                    Request approval from the user to run this command outside the sandbox. 
+                    Phrased a simple question that summarizes the purpose of the 
+                    command as it relates to the task at hand - e.g. 'Do you want to 
+                    fetch and pull the latest version of this git branch?'
+                   "#
+                    .to_string(),
                 ),
             },
         ),
@@ -199,11 +174,19 @@ fn create_approval_parameters(approval_policy: AskForApproval) -> BTreeMap<Strin
                 ),
             },
         ),
-        ])
-    }
+        (
+            "rule_prefix".to_string(),
+            JsonSchema::Array {
+                items: Box::new(JsonSchema::String { description: None }),
+                description: Some(
+                    r#"Only specify when request_approval is present. Prefix pattern for the rule to persist for this command. Should be a short but reasonable prefix, usually 2-3 arguments. e.g. [\"git\", \"pull\"] or [\"uv\", \"run\"]."#.to_string(),
+                ),
+            },
+        ),
+    ])
 }
 
-fn create_exec_command_tool(approval_policy: AskForApproval) -> ToolSpec {
+fn create_exec_command_tool() -> ToolSpec {
     let mut properties = BTreeMap::from([
         (
             "cmd".to_string(),
@@ -261,7 +244,7 @@ fn create_exec_command_tool(approval_policy: AskForApproval) -> ToolSpec {
             },
         ),
     ]);
-    properties.extend(create_approval_parameters(approval_policy));
+    properties.extend(create_approval_parameters());
 
     ToolSpec::Function(ResponsesApiTool {
         name: "exec_command".to_string(),
@@ -324,7 +307,7 @@ fn create_write_stdin_tool() -> ToolSpec {
     })
 }
 
-fn create_shell_tool(approval_policy: AskForApproval) -> ToolSpec {
+fn create_shell_tool() -> ToolSpec {
     let mut properties = BTreeMap::from([
         (
             "command".to_string(),
@@ -346,7 +329,7 @@ fn create_shell_tool(approval_policy: AskForApproval) -> ToolSpec {
             },
         ),
     ]);
-    properties.extend(create_approval_parameters(approval_policy));
+    properties.extend(create_approval_parameters());
 
     let description  = if cfg!(windows) {
         r#"Runs a Powershell command (Windows) and returns its output. Arguments to `shell` will be passed to CreateProcessW(). Most commands should be prefixed with ["powershell.exe", "-Command"].
@@ -377,7 +360,7 @@ Examples of valid command strings:
     })
 }
 
-fn create_shell_command_tool(approval_policy: AskForApproval) -> ToolSpec {
+fn create_shell_command_tool() -> ToolSpec {
     let mut properties = BTreeMap::from([
         (
             "command".to_string(),
@@ -409,7 +392,7 @@ fn create_shell_command_tool(approval_policy: AskForApproval) -> ToolSpec {
             },
         ),
     ]);
-    properties.extend(create_approval_parameters(approval_policy));
+    properties.extend(create_approval_parameters());
 
     let description = if cfg!(windows) {
         r#"Runs a Powershell command (Windows) and returns its output.
@@ -1271,13 +1254,13 @@ pub(crate) fn build_specs(
 
     match &config.shell_type {
         ConfigShellToolType::Default => {
-            builder.push_spec(create_shell_tool(config.approval_policy));
+            builder.push_spec(create_shell_tool());
         }
         ConfigShellToolType::Local => {
             builder.push_spec(ToolSpec::LocalShell {});
         }
         ConfigShellToolType::UnifiedExec => {
-            builder.push_spec(create_exec_command_tool(config.approval_policy));
+            builder.push_spec(create_exec_command_tool());
             builder.push_spec(create_write_stdin_tool());
             builder.register_handler("exec_command", unified_exec_handler.clone());
             builder.register_handler("write_stdin", unified_exec_handler);
@@ -1286,7 +1269,7 @@ pub(crate) fn build_specs(
             // Do nothing.
         }
         ConfigShellToolType::ShellCommand => {
-            builder.push_spec(create_shell_command_tool(config.approval_policy));
+            builder.push_spec(create_shell_command_tool());
         }
     }
 
@@ -1519,7 +1502,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Live),
-            approval_policy: AskForApproval::OnRequest,
         });
         let (tools, _) = build_specs(&config, None).build();
 
@@ -1542,7 +1524,7 @@ mod tests {
         // Build expected from the same helpers used by the builder.
         let mut expected: BTreeMap<String, ToolSpec> = BTreeMap::from([]);
         for spec in [
-            create_exec_command_tool(AskForApproval::OnRequest),
+            create_exec_command_tool(),
             create_write_stdin_tool(),
             create_list_mcp_resources_tool(),
             create_list_mcp_resource_templates_tool(),
@@ -1584,7 +1566,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
-            approval_policy: AskForApproval::OnRequest,
         });
         let (tools, _) = build_specs(&tools_config, None).build();
         assert_contains_tool_names(
@@ -1632,7 +1613,6 @@ mod tests {
             model_info: &model_info,
             features,
             web_search_mode,
-            approval_policy: AskForApproval::OnRequest,
         });
         let (tools, _) = build_specs(&tools_config, Some(HashMap::new())).build();
         let tool_names = tools.iter().map(|t| t.spec.name()).collect::<Vec<_>>();
@@ -1649,7 +1629,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
-            approval_policy: AskForApproval::OnRequest,
         });
         let (tools, _) = build_specs(&tools_config, None).build();
 
@@ -1672,7 +1651,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Live),
-            approval_policy: AskForApproval::OnRequest,
         });
         let (tools, _) = build_specs(&tools_config, None).build();
 
@@ -1919,7 +1897,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Live),
-            approval_policy: AskForApproval::OnRequest,
         });
         let (tools, _) = build_specs(&tools_config, Some(HashMap::new())).build();
 
@@ -1942,7 +1919,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
-            approval_policy: AskForApproval::OnRequest,
         });
         let (tools, _) = build_specs(&tools_config, None).build();
 
@@ -1962,7 +1938,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
-            approval_policy: AskForApproval::OnRequest,
         });
         let (tools, _) = build_specs(&tools_config, None).build();
 
@@ -1994,7 +1969,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Live),
-            approval_policy: AskForApproval::OnRequest,
         });
         let (tools, _) = build_specs(
             &tools_config,
@@ -2090,7 +2064,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
-            approval_policy: AskForApproval::OnRequest,
         });
 
         // Intentionally construct a map with keys that would sort alphabetically.
@@ -2168,7 +2141,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
-            approval_policy: AskForApproval::OnRequest,
         });
 
         let (tools, _) = build_specs(
@@ -2226,7 +2198,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
-            approval_policy: AskForApproval::OnRequest,
         });
 
         let (tools, _) = build_specs(
@@ -2281,7 +2252,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
-            approval_policy: AskForApproval::OnRequest,
         });
 
         let (tools, _) = build_specs(
@@ -2338,7 +2308,6 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
-            approval_policy: AskForApproval::OnRequest,
         });
 
         let (tools, _) = build_specs(
@@ -2384,7 +2353,7 @@ mod tests {
 
     #[test]
     fn test_shell_tool() {
-        let tool = super::create_shell_tool(AskForApproval::OnRequest);
+        let tool = super::create_shell_tool();
         let ToolSpec::Function(ResponsesApiTool {
             description, name, ..
         }) = &tool
@@ -2414,7 +2383,7 @@ Examples of valid command strings:
 
     #[test]
     fn test_shell_command_tool() {
-        let tool = super::create_shell_command_tool(AskForApproval::OnRequest);
+        let tool = super::create_shell_command_tool();
         let ToolSpec::Function(ResponsesApiTool {
             description, name, ..
         }) = &tool
@@ -2451,7 +2420,6 @@ Examples of valid command strings:
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
-            approval_policy: AskForApproval::OnRequest,
         });
         let (tools, _) = build_specs(
             &tools_config,
