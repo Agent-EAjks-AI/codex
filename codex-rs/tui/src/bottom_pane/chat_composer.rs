@@ -208,6 +208,7 @@ pub(crate) struct ChatComposer {
     pending_pastes: Vec<(String, String)>,
     large_paste_counters: HashMap<usize, usize>,
     has_focus: bool,
+    /// Invariant: attached images are labeled `[Image #1]..[Image #N]` in vec order.
     attached_images: Vec<AttachedImage>,
     placeholder_text: String,
     is_task_running: bool,
@@ -462,8 +463,9 @@ impl ChatComposer {
 
     /// Replace the composer content with text from an external editor.
     /// Clears pending paste placeholders and keeps only attachments whose
-    /// placeholder labels still appear in the new text. Cursor is placed at
-    /// the end after rebuilding elements.
+    /// placeholder labels still appear in the new text. Image placeholders
+    /// are renumbered to `[Image #1]..[Image #N]`. Cursor is placed at the end
+    /// after rebuilding elements.
     pub(crate) fn apply_external_edit(&mut self, text: String) {
         self.pending_pastes.clear();
 
@@ -525,6 +527,8 @@ impl ChatComposer {
             self.textarea.insert_str(&text[idx..]);
         }
 
+        // Keep image placeholders normalized to [Image #1].. in attachment order.
+        self.relabel_attached_images_and_update_placeholders();
         self.textarea.set_cursor(self.textarea.text().len());
         self.sync_popups();
     }
@@ -6024,7 +6028,7 @@ mod tests {
             false,
         );
 
-        let placeholder = "[image 10x10]".to_string();
+        let placeholder = local_image_label_text(1);
         composer.textarea.insert_element(&placeholder);
         composer.attached_images.push(AttachedImage {
             placeholder: placeholder.clone(),
@@ -6058,7 +6062,7 @@ mod tests {
             false,
         );
 
-        let placeholder = "[image 10x10]".to_string();
+        let placeholder = local_image_label_text(1);
         composer.textarea.insert_element(&placeholder);
         composer.attached_images.push(AttachedImage {
             placeholder: placeholder.clone(),
@@ -6108,7 +6112,7 @@ mod tests {
             false,
         );
 
-        let placeholder = "[image 10x10]".to_string();
+        let placeholder = local_image_label_text(1);
         composer.textarea.insert_element(&placeholder);
         composer.attached_images.push(AttachedImage {
             placeholder: placeholder.clone(),
