@@ -1896,7 +1896,7 @@ impl ChatWidget {
             auth_manager,
             models_manager,
             otel_manager,
-            session_header: SessionHeader::new(model_for_header),
+            session_header: SessionHeader::new(model_for_header.clone()),
             initial_user_message,
             token_info: None,
             rate_limit_snapshot: None,
@@ -1947,6 +1947,9 @@ impl ChatWidget {
             widget.config.features.enabled(Feature::CollaborationModes),
         );
         widget.update_collaboration_mode_indicator();
+        if model_for_header != DEFAULT_MODEL_DISPLAY_NAME {
+            widget.refresh_model_info(model_for_header);
+        }
 
         widget
     }
@@ -2017,7 +2020,7 @@ impl ChatWidget {
             auth_manager,
             models_manager,
             otel_manager,
-            session_header: SessionHeader::new(header_model),
+            session_header: SessionHeader::new(header_model.clone()),
             initial_user_message,
             token_info: None,
             rate_limit_snapshot: None,
@@ -2068,6 +2071,7 @@ impl ChatWidget {
             widget.config.features.enabled(Feature::CollaborationModes),
         );
         widget.update_collaboration_mode_indicator();
+        widget.refresh_model_info(header_model);
 
         widget
     }
@@ -4480,6 +4484,7 @@ impl ChatWidget {
             self.stored_collaboration_mode
                 .with_updates(Some(model.to_string()), None, None);
         self.current_model_info = None;
+        self.bottom_pane.set_personality_command_enabled(false);
         self.refresh_model_info(model.to_string());
     }
 
@@ -4493,7 +4498,10 @@ impl ChatWidget {
 
     pub(crate) fn update_model_info(&mut self, model: String, info: ModelInfo) {
         if self.current_model() == model {
+            let supports_personality = info.supports_personality();
             self.current_model_info = Some(info);
+            self.bottom_pane
+                .set_personality_command_enabled(supports_personality);
         }
         if self
             .pending_personality_popup_model
