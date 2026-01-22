@@ -50,6 +50,7 @@ use codex_core::protocol::SkillErrorInfo;
 use codex_core::protocol::TokenUsage;
 use codex_otel::OtelManager;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::Personality;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelUpgrade;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -1054,6 +1055,9 @@ impl App {
                 self.chat_widget.set_collaboration_mode(mode);
                 self.chat_widget.set_model(&model);
             }
+            AppEvent::UpdatePersonality(personality) => {
+                self.on_update_personality(personality);
+            }
             AppEvent::OpenReasoningPopup { model } => {
                 self.chat_widget.open_reasoning_popup(model);
             }
@@ -1303,6 +1307,41 @@ impl App {
                         } else {
                             self.chat_widget
                                 .add_error_message(format!("Failed to save default model: {err}"));
+                        }
+                    }
+                }
+            }
+            AppEvent::PersistPersonalitySelection { personality } => {
+                let profile = self.active_profile.as_deref();
+                match ConfigEditsBuilder::new(&self.config.codex_home)
+                    .with_profile(profile)
+                    .set_model_personality(Some(personality))
+                    .apply()
+                    .await
+                {
+                    Ok(()) => {
+                        let label = Self::personality_label(personality);
+                        let mut message = format!("Personality set to {label}");
+                        if let Some(profile) = profile {
+                            message.push_str(" for ");
+                            message.push_str(profile);
+                            message.push_str(" profile");
+                        }
+                        self.chat_widget.add_info_message(message, None);
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "failed to persist personality selection"
+                        );
+                        if let Some(profile) = profile {
+                            self.chat_widget.add_error_message(format!(
+                                "Failed to save personality for profile `{profile}`: {err}"
+                            ));
+                        } else {
+                            self.chat_widget.add_error_message(format!(
+                                "Failed to save default personality: {err}"
+                            ));
                         }
                     }
                 }
@@ -1684,6 +1723,18 @@ impl App {
         // Instead, explicitly pass the stored collaboration mode's effort into new sessions.
         self.config.model_reasoning_effort = effort;
         self.chat_widget.set_reasoning_effort(effort);
+    }
+
+    fn on_update_personality(&mut self, personality: Personality) {
+        self.config.model_personality = Some(personality);
+        self.chat_widget.set_personality(personality);
+    }
+
+    fn personality_label(personality: Personality) -> &'static str {
+        match personality {
+            Personality::Friendly => "Friendly",
+            Personality::Pragmatic => "Pragmatic",
+        }
     }
 
     async fn launch_external_editor(&mut self, tui: &mut tui::Tui) {
