@@ -240,6 +240,9 @@ fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<()> {
         .assert()
         .success();
 
+    // Ensure updated_at (truncated to seconds) differs between sessions.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
     let marker_b = format!("resume-cwd-b-{}", Uuid::new_v4());
     let prompt_b = format!("echo {marker_b}");
     test.cmd()
