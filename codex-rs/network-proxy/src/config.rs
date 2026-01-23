@@ -2,6 +2,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -28,6 +29,8 @@ pub struct NetworkProxyConfig {
     pub mode: NetworkMode,
     #[serde(default)]
     pub policy: NetworkPolicy,
+    #[serde(default)]
+    pub mitm: MitmConfig,
 }
 
 impl Default for NetworkProxyConfig {
@@ -41,6 +44,7 @@ impl Default for NetworkProxyConfig {
             dangerously_allow_non_loopback_admin: false,
             mode: NetworkMode::default(),
             policy: NetworkPolicy::default(),
+            mitm: MitmConfig::default(),
         }
     }
 }
@@ -65,12 +69,50 @@ pub enum NetworkMode {
     Full,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MitmConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub inspect: bool,
+    #[serde(default = "default_mitm_max_body_bytes")]
+    pub max_body_bytes: usize,
+    #[serde(default = "default_ca_cert_path")]
+    pub ca_cert_path: PathBuf,
+    #[serde(default = "default_ca_key_path")]
+    pub ca_key_path: PathBuf,
+}
+
+impl Default for MitmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            inspect: false,
+            max_body_bytes: default_mitm_max_body_bytes(),
+            ca_cert_path: default_ca_cert_path(),
+            ca_key_path: default_ca_key_path(),
+        }
+    }
+}
+
 fn default_proxy_url() -> String {
     "http://127.0.0.1:3128".to_string()
 }
 
 fn default_admin_url() -> String {
     "http://127.0.0.1:8080".to_string()
+}
+
+fn default_ca_cert_path() -> PathBuf {
+    PathBuf::from("network_proxy/mitm/ca.pem")
+}
+
+fn default_ca_key_path() -> PathBuf {
+    PathBuf::from("network_proxy/mitm/ca.key")
+}
+
+fn default_mitm_max_body_bytes() -> usize {
+    4096
 }
 
 fn clamp_non_loopback(addr: SocketAddr, allow_non_loopback: bool, name: &str) -> SocketAddr {

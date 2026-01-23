@@ -1,11 +1,13 @@
 use crate::admin;
 use crate::config;
 use crate::http_proxy;
+use crate::init;
 use crate::network_policy::NetworkPolicyDecider;
 use crate::socks5;
 use crate::state::AppState;
 use anyhow::Result;
 use clap::Parser;
+use clap::Subcommand;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -14,9 +16,17 @@ use tracing::warn;
 #[derive(Debug, Clone, Parser)]
 #[command(name = "codex-network-proxy", about = "Codex network sandbox proxy")]
 pub struct Args {
+    #[command(subcommand)]
+    pub command: Option<Command>,
     /// Enable SOCKS5 UDP associate support (default: disabled).
     #[arg(long, default_value_t = false)]
     pub enable_socks5_udp: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum Command {
+    /// Initialize the Codex network proxy directories (e.g. MITM cert paths).
+    Init,
 }
 
 #[derive(Clone, Default)]
@@ -185,4 +195,8 @@ impl NetworkProxyHandle {
         let _ = self.admin_task.await;
         Ok(())
     }
+}
+
+pub fn run_init() -> Result<()> {
+    init::run_init()
 }
