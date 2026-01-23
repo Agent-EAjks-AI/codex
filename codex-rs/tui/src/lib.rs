@@ -24,13 +24,13 @@ use codex_core::config::find_codex_home;
 use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::config::resolve_oss_provider;
 use codex_core::find_thread_path_by_id_str;
-use codex_core::windows_sandbox::WindowsSandboxModeExt;
-use codex_protocol::config_types::WindowsSandboxMode;
 use codex_core::protocol::AskForApproval;
 use codex_core::read_session_meta_line;
 use codex_core::terminal::Multiplexer;
+use codex_core::windows_sandbox::WindowsSandboxModeExt;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::config_types::WindowsSandboxMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -837,4 +837,3 @@ mod tests {
         Ok(())
     }
 }
-

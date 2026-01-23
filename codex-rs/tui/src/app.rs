@@ -33,8 +33,6 @@ use crate::update_action::UpdateAction;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_core::AuthManager;
-#[cfg(target_os = "windows")]
-use codex_core::windows_sandbox::WindowsSandboxModeExt;
 use codex_core::CodexAuth;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
@@ -55,15 +53,17 @@ use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::SkillErrorInfo;
 use codex_core::protocol::TokenUsage;
+#[cfg(target_os = "windows")]
+use codex_core::windows_sandbox::WindowsSandboxModeExt;
 use codex_otel::OtelManager;
 use codex_protocol::ThreadId;
+#[cfg(target_os = "windows")]
+use codex_protocol::config_types::WindowsSandboxMode;
 use codex_protocol::items::TurnItem;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelUpgrade;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::SessionConfiguredEvent;
-#[cfg(target_os = "windows")]
-use codex_protocol::config_types::WindowsSandboxMode;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use crossterm::event::KeyCode;
@@ -1699,8 +1699,7 @@ impl App {
                 }
                 #[cfg(target_os = "windows")]
                 if !matches!(&policy, codex_core::protocol::SandboxPolicy::ReadOnly)
-                    || WindowsSandboxMode::from_config(&self.config)
-                        != WindowsSandboxMode::Disabled
+                    || WindowsSandboxMode::from_config(&self.config) != WindowsSandboxMode::Disabled
                 {
                     self.config.forced_auto_mode_downgraded_on_windows = false;
                 }
@@ -1780,8 +1779,8 @@ impl App {
                     #[cfg(target_os = "windows")]
                     {
                         let windows_sandbox_mode = WindowsSandboxMode::from_config(&self.config);
-                        self.app_event_tx.send(AppEvent::CodexOp(
-                            Op::OverrideTurnContext {
+                        self.app_event_tx
+                            .send(AppEvent::CodexOp(Op::OverrideTurnContext {
                                 cwd: None,
                                 approval_policy: None,
                                 sandbox_policy: None,
@@ -1791,8 +1790,7 @@ impl App {
                                 summary: None,
                                 collaboration_mode: None,
                                 personality: None,
-                            },
-                        ));
+                            }));
                     }
                 }
                 if let Err(err) = builder.apply().await {
