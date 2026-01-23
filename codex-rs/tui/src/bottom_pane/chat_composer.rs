@@ -322,6 +322,7 @@ impl ChatComposer {
         self.collaboration_mode_indicator = indicator;
     }
 
+    #[cfg(target_os = "windows")]
     pub fn set_windows_degraded_sandbox_active(&mut self, enabled: bool) {
         self.windows_degraded_sandbox_active = enabled;
     }
