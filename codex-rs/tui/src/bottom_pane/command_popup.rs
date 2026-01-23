@@ -14,13 +14,6 @@ use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
 use std::collections::HashSet;
 
-fn windows_degraded_sandbox_active() -> bool {
-    cfg!(target_os = "windows")
-        && codex_core::windows_sandbox::ELEVATED_SANDBOX_NUX_ENABLED
-        && codex_core::get_platform_sandbox().is_some()
-        && !codex_core::is_windows_elevated_sandbox_enabled()
-}
-
 /// A selectable item in the popup: either a built-in command or a user prompt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CommandItem {
@@ -39,11 +32,12 @@ pub(crate) struct CommandPopup {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CommandPopupFlags {
     pub(crate) collaboration_modes_enabled: bool,
+    pub(crate) windows_degraded_sandbox_active: bool,
 }
 
 impl CommandPopup {
     pub(crate) fn new(mut prompts: Vec<CustomPrompt>, flags: CommandPopupFlags) -> Self {
-        let allow_elevate_sandbox = windows_degraded_sandbox_active();
+        let allow_elevate_sandbox = flags.windows_degraded_sandbox_active;
         let builtins: Vec<(&'static str, SlashCommand)> = built_in_slash_commands()
             .into_iter()
             .filter(|(_, cmd)| allow_elevate_sandbox || *cmd != SlashCommand::ElevateSandbox)
@@ -466,6 +460,7 @@ mod tests {
             Vec::new(),
             CommandPopupFlags {
                 collaboration_modes_enabled: true,
+                windows_degraded_sandbox_active: false,
             },
         );
         popup.on_composer_text_change("/collab".to_string());

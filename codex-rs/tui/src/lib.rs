@@ -24,7 +24,8 @@ use codex_core::config::find_codex_home;
 use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::config::resolve_oss_provider;
 use codex_core::find_thread_path_by_id_str;
-use codex_core::get_platform_sandbox;
+use codex_core::windows_sandbox::WindowsSandboxModeExt;
+use codex_protocol::config_types::WindowsSandboxMode;
 use codex_core::protocol::AskForApproval;
 use codex_core::read_session_meta_line;
 use codex_core::terminal::Multiplexer;
@@ -721,7 +722,9 @@ async fn load_config_or_exit_with_fallback_cwd(
 /// or if the current cwd project is already trusted. If not, we need to
 /// show the trust screen.
 fn should_show_trust_screen(config: &Config) -> bool {
-    if cfg!(target_os = "windows") && get_platform_sandbox().is_none() {
+    if cfg!(target_os = "windows")
+        && WindowsSandboxMode::from_config(config) == WindowsSandboxMode::Disabled
+    {
         // If the experimental sandbox is not enabled, Native Windows cannot enforce sandboxed write access; skip the trust prompt entirely.
         return false;
     }
@@ -834,3 +837,4 @@ mod tests {
         Ok(())
     }
 }
+

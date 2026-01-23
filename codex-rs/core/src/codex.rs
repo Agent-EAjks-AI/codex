@@ -167,11 +167,13 @@ use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::user_notification::UserNotification;
 use crate::util::backoff;
+use crate::windows_sandbox::WindowsSandboxModeExt;
 use codex_async_utils::OrCancelExt;
 use codex_otel::OtelManager;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+use codex_protocol::config_types::WindowsSandboxMode;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::DeveloperInstructions;
 use codex_protocol::models::ResponseInputItem;
@@ -311,6 +313,7 @@ impl Codex {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.approval_policy.clone(),
             sandbox_policy: config.sandbox_policy.clone(),
+            windows_sandbox_mode: WindowsSandboxMode::from_config(&config),
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             session_source,
@@ -424,6 +427,7 @@ pub(crate) struct TurnContext {
     pub(crate) personality: Option<Personality>,
     pub(crate) approval_policy: AskForApproval,
     pub(crate) sandbox_policy: SandboxPolicy,
+    pub(crate) windows_sandbox_mode: WindowsSandboxMode,
     pub(crate) shell_environment_policy: ShellEnvironmentPolicy,
     pub(crate) tools_config: ToolsConfig,
     pub(crate) ghost_snapshot: GhostSnapshotConfig,
@@ -474,6 +478,7 @@ pub(crate) struct SessionConfiguration {
     approval_policy: Constrained<AskForApproval>,
     /// How to sandbox commands executed in the system
     sandbox_policy: Constrained<SandboxPolicy>,
+    windows_sandbox_mode: WindowsSandboxMode,
 
     /// Working directory that should be treated as the *root* of the
     /// session. All relative paths supplied by the model as well as the
@@ -508,6 +513,9 @@ impl SessionConfiguration {
         if let Some(sandbox_policy) = updates.sandbox_policy.clone() {
             next_configuration.sandbox_policy.set(sandbox_policy)?;
         }
+        if let Some(windows_sandbox_mode) = updates.windows_sandbox_mode {
+            next_configuration.windows_sandbox_mode = windows_sandbox_mode;
+        }
         if let Some(cwd) = updates.cwd.clone() {
             next_configuration.cwd = cwd;
         }
@@ -520,6 +528,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) approval_policy: Option<AskForApproval>,
     pub(crate) sandbox_policy: Option<SandboxPolicy>,
+    pub(crate) windows_sandbox_mode: Option<WindowsSandboxMode>,
     pub(crate) collaboration_mode: Option<CollaborationMode>,
     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
     pub(crate) final_output_json_schema: Option<Option<Value>>,
@@ -584,6 +593,7 @@ impl Session {
             personality: session_configuration.personality,
             approval_policy: session_configuration.approval_policy.value(),
             sandbox_policy: session_configuration.sandbox_policy.get().clone(),
+            windows_sandbox_mode: session_configuration.windows_sandbox_mode,
             shell_environment_policy: per_turn_config.shell_environment_policy.clone(),
             tools_config,
             ghost_snapshot: per_turn_config.ghost_snapshot.clone(),
@@ -2077,6 +2087,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 cwd,
                 approval_policy,
                 sandbox_policy,
+                windows_sandbox_mode,
                 model,
                 effort,
                 summary,
@@ -2100,6 +2111,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                         cwd,
                         approval_policy,
                         sandbox_policy,
+                        windows_sandbox_mode,
                         collaboration_mode: Some(collaboration_mode),
                         reasoning_summary: summary,
                         personality,
@@ -2303,6 +2315,7 @@ mod handlers {
                         cwd: Some(cwd),
                         approval_policy: Some(approval_policy),
                         sandbox_policy: Some(sandbox_policy),
+                        windows_sandbox_mode: None,
                         collaboration_mode,
                         reasoning_summary: Some(summary),
                         final_output_json_schema: Some(final_output_json_schema),
@@ -2782,6 +2795,7 @@ async fn spawn_review_thread(
         personality: parent_turn_context.personality,
         approval_policy: parent_turn_context.approval_policy,
         sandbox_policy: parent_turn_context.sandbox_policy.clone(),
+        windows_sandbox_mode: parent_turn_context.windows_sandbox_mode,
         shell_environment_policy: parent_turn_context.shell_environment_policy.clone(),
         cwd: parent_turn_context.cwd.clone(),
         final_output_json_schema: None,
@@ -3897,6 +3911,7 @@ mod tests {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.approval_policy.clone(),
             sandbox_policy: config.sandbox_policy.clone(),
+            windows_sandbox_mode: WindowsSandboxMode::from_config(&config),
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             session_source: SessionSource::Exec,
@@ -3973,6 +3988,7 @@ mod tests {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.approval_policy.clone(),
             sandbox_policy: config.sandbox_policy.clone(),
+            windows_sandbox_mode: WindowsSandboxMode::from_config(&config),
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             session_source: SessionSource::Exec,
@@ -4233,6 +4249,7 @@ mod tests {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.approval_policy.clone(),
             sandbox_policy: config.sandbox_policy.clone(),
+            windows_sandbox_mode: WindowsSandboxMode::from_config(&config),
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             session_source: SessionSource::Exec,
@@ -4338,6 +4355,7 @@ mod tests {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.approval_policy.clone(),
             sandbox_policy: config.sandbox_policy.clone(),
+            windows_sandbox_mode: WindowsSandboxMode::from_config(&config),
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             session_source: SessionSource::Exec,
@@ -4838,6 +4856,7 @@ mod tests {
             expiration: timeout_ms.into(),
             env: HashMap::new(),
             sandbox_permissions,
+            windows_sandbox_mode: turn_context.windows_sandbox_mode,
             justification: Some("test".to_string()),
             arg0: None,
         };
@@ -4848,6 +4867,7 @@ mod tests {
             cwd: params.cwd.clone(),
             expiration: timeout_ms.into(),
             env: HashMap::new(),
+            windows_sandbox_mode: turn_context.windows_sandbox_mode,
             justification: params.justification.clone(),
             arg0: None,
         };
@@ -4980,3 +5000,4 @@ mod tests {
         pretty_assertions::assert_eq!(output, expected);
     }
 }
+

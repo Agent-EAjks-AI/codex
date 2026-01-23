@@ -148,13 +148,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
-fn windows_degraded_sandbox_active() -> bool {
-    cfg!(target_os = "windows")
-        && codex_core::windows_sandbox::ELEVATED_SANDBOX_NUX_ENABLED
-        && codex_core::get_platform_sandbox().is_some()
-        && !codex_core::is_windows_elevated_sandbox_enabled()
-}
-
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
@@ -235,6 +228,7 @@ pub(crate) struct ChatComposer {
     steer_enabled: bool,
     collaboration_modes_enabled: bool,
     collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    windows_degraded_sandbox_active: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -296,6 +290,7 @@ impl ChatComposer {
             steer_enabled: false,
             collaboration_modes_enabled: false,
             collaboration_mode_indicator: None,
+            windows_degraded_sandbox_active: false,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -325,6 +320,10 @@ impl ChatComposer {
         indicator: Option<CollaborationModeIndicator>,
     ) {
         self.collaboration_mode_indicator = indicator;
+    }
+
+    pub fn set_windows_degraded_sandbox_active(&mut self, enabled: bool) {
+        self.windows_degraded_sandbox_active = enabled;
     }
 
     fn layout_areas(&self, area: Rect) -> [Rect; 3] {
@@ -1632,7 +1631,10 @@ impl ChatComposer {
             let treat_as_plain_text = input_starts_with_space || name.contains('/');
             if !treat_as_plain_text {
                 let is_builtin =
-                    Self::built_in_slash_commands_for_input(self.collaboration_modes_enabled)
+                    Self::built_in_slash_commands_for_input(
+                        self.collaboration_modes_enabled,
+                        self.windows_degraded_sandbox_active,
+                    )
                         .any(|(command_name, _)| command_name == name);
                 let prompt_prefix = format!("{PROMPTS_CMD_PREFIX}:");
                 let is_known_prompt = name
@@ -1799,7 +1801,10 @@ impl ChatComposer {
         if let Some((name, rest, _rest_offset)) = parse_slash_name(first_line)
             && rest.is_empty()
             && let Some((_n, cmd)) =
-                Self::built_in_slash_commands_for_input(self.collaboration_modes_enabled)
+                Self::built_in_slash_commands_for_input(
+                    self.collaboration_modes_enabled,
+                    self.windows_degraded_sandbox_active,
+                )
                     .find(|(n, _)| *n == name)
         {
             self.textarea.set_text_clearing_elements("");
@@ -1821,7 +1826,10 @@ impl ChatComposer {
                 && !rest.is_empty()
                 && !name.contains('/')
                 && let Some((_n, cmd)) =
-                    Self::built_in_slash_commands_for_input(self.collaboration_modes_enabled)
+                    Self::built_in_slash_commands_for_input(
+                        self.collaboration_modes_enabled,
+                        self.windows_degraded_sandbox_active,
+                    )
                         .find(|(command_name, _)| *command_name == name)
                 && cmd == SlashCommand::Review
             {
@@ -2286,7 +2294,10 @@ impl ChatComposer {
         }
 
         let builtin_match =
-            Self::built_in_slash_commands_for_input(self.collaboration_modes_enabled)
+            Self::built_in_slash_commands_for_input(
+                self.collaboration_modes_enabled,
+                self.windows_degraded_sandbox_active,
+            )
                 .any(|(cmd_name, _)| fuzzy_match(cmd_name, name).is_some());
 
         if builtin_match {
@@ -2344,6 +2355,7 @@ impl ChatComposer {
                         self.custom_prompts.clone(),
                         CommandPopupFlags {
                             collaboration_modes_enabled,
+                            windows_degraded_sandbox_active: self.windows_degraded_sandbox_active,
                         },
                     );
                     command_popup.on_composer_text_change(first_line.to_string());
@@ -2355,8 +2367,8 @@ impl ChatComposer {
 
     fn built_in_slash_commands_for_input(
         collaboration_modes_enabled: bool,
+        allow_elevate_sandbox: bool,
     ) -> impl Iterator<Item = (&'static str, SlashCommand)> {
-        let allow_elevate_sandbox = windows_degraded_sandbox_active();
         built_in_slash_commands()
             .into_iter()
             .filter(move |(_, cmd)| allow_elevate_sandbox || *cmd != SlashCommand::ElevateSandbox)
