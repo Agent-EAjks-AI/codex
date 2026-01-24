@@ -15,6 +15,7 @@ pub(crate) struct SessionState {
     pub(crate) history: ContextManager,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) server_reasoning_included: bool,
+    pub(crate) next_mcp_tool_selection: Option<Vec<String>>,
 }
 
 impl SessionState {
@@ -26,6 +27,7 @@ impl SessionState {
             history,
             latest_rate_limits: None,
             server_reasoning_included: false,
+            next_mcp_tool_selection: None,
         }
     }
 
@@ -91,6 +93,14 @@ impl SessionState {
 
     pub(crate) fn server_reasoning_included(&self) -> bool {
         self.server_reasoning_included
+    }
+
+    pub(crate) fn set_next_mcp_tool_selection(&mut self, tool_names: Vec<String>) {
+        self.next_mcp_tool_selection = Some(tool_names);
+    }
+
+    pub(crate) fn take_next_mcp_tool_selection(&mut self) -> Option<Vec<String>> {
+        self.next_mcp_tool_selection.take()
     }
 }
 
