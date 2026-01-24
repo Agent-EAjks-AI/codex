@@ -1262,7 +1262,7 @@ fn agent_message_text(agent_message: &codex_protocol::items::AgentMessageItem) -
         .content
         .iter()
         .map(|content| match content {
-            codex_protocol::items::AgentMessageContent::Text { text } => text,
+            codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
         })
         .collect()
 }
@@ -1892,6 +1892,7 @@ mod tests {
     use anyhow::Result;
     use anyhow::anyhow;
     use anyhow::bail;
+    use codex_app_server_protocol::TurnPlanStepStatus;
     use codex_core::protocol::CreditsSnapshot;
     use codex_core::protocol::McpInvocation;
     use codex_core::protocol::RateLimitSnapshot;
@@ -1899,6 +1900,8 @@ mod tests {
     use codex_core::protocol::TokenUsage;
     use codex_core::protocol::TokenUsageInfo;
     use codex_protocol::config_types::ModeKind;
+    use codex_protocol::plan_tool::PlanItemArg;
+    use codex_protocol::plan_tool::StepStatus;
     use mcp_types::CallToolResult;
     use mcp_types::ContentBlock;
     use mcp_types::TextContent;
