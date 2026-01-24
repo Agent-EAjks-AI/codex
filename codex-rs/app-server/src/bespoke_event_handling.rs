@@ -1117,7 +1117,7 @@ async fn handle_turn_plan_update(
     api_version: ApiVersion,
     outgoing: &OutgoingMessageSender,
 ) {
-    // `update_plan` is a todo/checklist tool; it is not the signal for plan-mode rendering.
+    // `update_plan` is a todo/checklist tool; it is not related to plan-mode updates
     if let ApiVersion::V2 = api_version {
         let notification = TurnPlanUpdatedNotification {
             thread_id: conversation_id.to_string(),
