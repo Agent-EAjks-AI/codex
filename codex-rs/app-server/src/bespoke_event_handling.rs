@@ -1371,12 +1371,13 @@ async fn handle_turn_complete(
         None => (TurnStatus::Completed, None),
     };
 
-    if matches!(status, TurnStatus::Completed) && plan_mode && plan_item_requested {
-        if let Some(last_id) = last_agent_message_id {
-            if let Some(text) = agent_message_text_by_id.get(&last_id) {
-                emit_plan_item(conversation_id, &event_turn_id, text.clone(), outgoing).await;
-            }
-        }
+    if matches!(status, TurnStatus::Completed)
+        && plan_mode
+        && plan_item_requested
+        && let Some(last_id) = last_agent_message_id
+        && let Some(text) = agent_message_text_by_id.get(&last_id)
+    {
+        emit_plan_item(conversation_id, &event_turn_id, text.clone(), outgoing).await;
     }
     emit_turn_completed_with_status(conversation_id, event_turn_id, status, error, outgoing).await;
 }
