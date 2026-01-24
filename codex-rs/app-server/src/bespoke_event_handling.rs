@@ -566,15 +566,6 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::AgentMessageContentDelta(event) => {
-            // Record deltas early so we can still emit a plan item at turn end even if the
-            // stream errors or is interrupted before an `ItemCompleted` arrives.
-            record_plan_output_delta(
-                conversation_id,
-                &event.item_id,
-                &event.delta,
-                &turn_summary_store,
-            )
-            .await;
             let notification = AgentMessageDeltaNotification {
                 thread_id: conversation_id.to_string(),
                 turn_id: event_turn_id.clone(),
@@ -759,12 +750,7 @@ pub(crate) async fn apply_bespoke_event_handling(
         }
         EventMsg::ItemCompleted(item_completed_event) => {
             if let TurnItem::AgentMessage(agent_message) = &item_completed_event.item {
-                record_plan_output_from_completion(
-                    conversation_id,
-                    agent_message,
-                    &turn_summary_store,
-                )
-                .await;
+                record_plan_output(conversation_id, agent_message, &turn_summary_store).await;
             }
             let item: ThreadItem = item_completed_event.item.clone().into();
             let notification = ItemCompletedNotification {
@@ -1269,14 +1255,9 @@ fn agent_message_text(agent_message: &codex_protocol::items::AgentMessageItem) -
         .collect()
 }
 
-/// Record streamed assistant output as the plan-mode render signal.
-/// Deltas can arrive without a matching `ItemCompleted` (interrupts, stream
-/// errors, retries), so we accumulate them and mark the turn as having plan
-/// output as soon as we observe plan-mode assistant text.
-async fn record_plan_output_delta(
+async fn record_plan_output(
     conversation_id: ThreadId,
-    item_id: &str,
-    delta: &str,
+    agent_message: &codex_protocol::items::AgentMessageItem,
     turn_summary_store: &TurnSummaryStore,
 ) {
     let mut map = turn_summary_store.lock().await;
@@ -1284,39 +1265,8 @@ async fn record_plan_output_delta(
     if !is_plan_mode(summary) {
         return;
     }
-    // Accumulate assistant output per item so we can later synthesize a plan
-    // item from the final assistant message, independent of the `update_plan` tool.
-    let text = summary
-        .agent_message_text_by_id
-        .entry(item_id.to_string())
-        .or_default();
-    text.push_str(delta);
-    summary.last_agent_message_id = Some(item_id.to_string());
-    // Plan output is derived from the final assistant message, not from update_plan.
-    summary.plan_item_requested = true;
-}
-
-async fn record_plan_output_from_completion(
-    conversation_id: ThreadId,
-    agent_message: &codex_protocol::items::AgentMessageItem,
-    turn_summary_store: &TurnSummaryStore,
-) -> bool {
-    let mut map = turn_summary_store.lock().await;
-    let summary = map.entry(conversation_id).or_default();
-    if !is_plan_mode(summary) {
-        return false;
-    }
-    let text = summary
-        .agent_message_text_by_id
-        .entry(agent_message.id.clone())
-        .or_default();
-    if text.is_empty() {
-        *text = agent_message_text(agent_message);
-    }
-    summary.last_agent_message_id = Some(agent_message.id.clone());
-    // Plan output is derived from the final assistant message, not from update_plan.
-    summary.plan_item_requested = true;
-    true
+    // In plan mode we rely on the completed assistant message as the plan payload.
+    summary.last_agent_message_text = Some(agent_message_text(agent_message));
 }
 
 async fn emit_plan_item(
@@ -1367,9 +1317,7 @@ async fn handle_turn_complete(
     let TurnSummary {
         last_error,
         collaboration_mode_kind,
-        plan_item_requested,
-        agent_message_text_by_id,
-        last_agent_message_id,
+        last_agent_message_text,
         ..
     } = turn_summary;
     let plan_mode = collaboration_mode_kind == Some(ModeKind::Plan);
@@ -1381,11 +1329,9 @@ async fn handle_turn_complete(
 
     if matches!(status, TurnStatus::Completed)
         && plan_mode
-        && plan_item_requested
-        && let Some(last_id) = last_agent_message_id
-        && let Some(text) = agent_message_text_by_id.get(&last_id)
+        && let Some(text) = last_agent_message_text
     {
-        emit_plan_item(conversation_id, &event_turn_id, text.clone(), outgoing).await;
+        emit_plan_item(conversation_id, &event_turn_id, text, outgoing).await;
     }
     emit_turn_completed_with_status(conversation_id, event_turn_id, status, error, outgoing).await;
 }
@@ -2154,12 +2100,7 @@ mod tests {
                 conversation_id,
                 TurnSummary {
                     collaboration_mode_kind: Some(ModeKind::Plan),
-                    plan_item_requested: true,
-                    agent_message_text_by_id: HashMap::from([(
-                        "agent-1".to_string(),
-                        plan_text.clone(),
-                    )]),
-                    last_agent_message_id: Some("agent-1".to_string()),
+                    last_agent_message_text: Some(plan_text.clone()),
                     ..Default::default()
                 },
             );

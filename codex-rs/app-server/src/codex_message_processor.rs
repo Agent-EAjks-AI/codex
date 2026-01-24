@@ -214,15 +214,8 @@ pub(crate) struct TurnSummary {
     pub(crate) file_change_started: HashSet<String>,
     pub(crate) last_error: Option<TurnError>,
     pub(crate) collaboration_mode_kind: Option<ModeKind>,
-
-    /// Per-turn signal for rendering a plan item in plan mode.
-    /// We set it when we observe assistant output in plan mode (deltas or
-    /// completion) so we can synthesize a `ThreadItem::Plan` at turn end even
-    /// if the stream aborts before an `ItemCompleted` event arrives.
-    pub(crate) plan_item_requested: bool,
-
-    pub(crate) agent_message_text_by_id: HashMap<String, String>,
-    pub(crate) last_agent_message_id: Option<String>,
+    /// Last completed assistant message text observed for this turn.
+    pub(crate) last_agent_message_text: Option<String>,
 }
 
 pub(crate) type TurnSummaryStore = Arc<Mutex<HashMap<ThreadId, TurnSummary>>>;
