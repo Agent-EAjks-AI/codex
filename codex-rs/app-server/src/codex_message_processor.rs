@@ -216,6 +216,7 @@ pub(crate) struct TurnSummary {
     pub(crate) last_error: Option<TurnError>,
     pub(crate) last_plan_update: Option<UpdatePlanArgs>,
     pub(crate) collaboration_mode_kind: Option<ModeKind>,
+    pub(crate) agent_messages_started_before_plan_update: HashSet<String>,
 }
 
 pub(crate) type TurnSummaryStore = Arc<Mutex<HashMap<ThreadId, TurnSummary>>>;

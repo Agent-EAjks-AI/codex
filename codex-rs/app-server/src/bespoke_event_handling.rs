@@ -566,7 +566,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::AgentMessageContentDelta(event) => {
-            if should_suppress_agent_message(conversation_id, &turn_summary_store).await {
+            if should_suppress_agent_message(conversation_id, &event.item_id, &turn_summary_store)
+                .await
+            {
                 // Once we have a plan update in plan mode, we render the synthesized plan item instead.
                 return;
             }
@@ -742,9 +744,13 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::ItemStarted(item_started_event) => {
-            let is_agent_message = matches!(&item_started_event.item, TurnItem::AgentMessage(_));
-            if is_agent_message
-                && should_suppress_agent_message(conversation_id, &turn_summary_store).await
+            if let TurnItem::AgentMessage(agent_message) = &item_started_event.item
+                && handle_agent_message_start(
+                    conversation_id,
+                    &agent_message.id,
+                    &turn_summary_store,
+                )
+                .await
             {
                 return;
             }
@@ -759,9 +765,13 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::ItemCompleted(item_completed_event) => {
-            let is_agent_message = matches!(&item_completed_event.item, TurnItem::AgentMessage(_));
-            if is_agent_message
-                && should_suppress_agent_message(conversation_id, &turn_summary_store).await
+            if let TurnItem::AgentMessage(agent_message) = &item_completed_event.item
+                && should_suppress_agent_message(
+                    conversation_id,
+                    &agent_message.id,
+                    &turn_summary_store,
+                )
+                .await
             {
                 return;
             }
@@ -1260,22 +1270,41 @@ async fn maybe_emit_raw_response_item_completed(
         .await;
 }
 
-async fn plan_mode_with_plan_update_observed(
+fn plan_mode_with_plan_update_observed(summary: &TurnSummary) -> bool {
+    summary.collaboration_mode_kind == Some(ModeKind::Plan) && summary.last_plan_update.is_some()
+}
+
+async fn handle_agent_message_start(
     conversation_id: ThreadId,
+    item_id: &str,
     turn_summary_store: &TurnSummaryStore,
 ) -> bool {
-    let map = turn_summary_store.lock().await;
-    map.get(&conversation_id).is_some_and(|summary| {
-        summary.collaboration_mode_kind == Some(ModeKind::Plan)
-            && summary.last_plan_update.is_some()
-    })
+    let mut map = turn_summary_store.lock().await;
+    let summary = map.entry(conversation_id).or_default();
+    if plan_mode_with_plan_update_observed(summary) {
+        // Suppress agent messages that start after we've observed a plan update.
+        return !summary
+            .agent_messages_started_before_plan_update
+            .contains(item_id);
+    }
+    summary
+        .agent_messages_started_before_plan_update
+        .insert(item_id.to_string());
+    false
 }
 
 async fn should_suppress_agent_message(
     conversation_id: ThreadId,
+    item_id: &str,
     turn_summary_store: &TurnSummaryStore,
 ) -> bool {
-    plan_mode_with_plan_update_observed(conversation_id, turn_summary_store).await
+    let map = turn_summary_store.lock().await;
+    map.get(&conversation_id).is_some_and(|summary| {
+        plan_mode_with_plan_update_observed(summary)
+            && !summary
+                .agent_messages_started_before_plan_update
+                .contains(item_id)
+    })
 }
 
 async fn emit_plan_item(
@@ -2194,6 +2223,57 @@ mod tests {
             other => bail!("unexpected message: {other:?}"),
         }
         assert!(rx.try_recv().is_err(), "no extra messages expected");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn plan_update_does_not_strand_started_agent_message() -> Result<()> {
+        let conversation_id = ThreadId::new();
+        let turn_summary_store = new_turn_summary_store();
+        let (tx, _rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = OutgoingMessageSender::new(tx);
+
+        {
+            let mut map = turn_summary_store.lock().await;
+            map.insert(
+                conversation_id,
+                TurnSummary {
+                    collaboration_mode_kind: Some(ModeKind::Plan),
+                    ..Default::default()
+                },
+            );
+        }
+
+        let agent_item_id = "agent-1";
+        let suppressed =
+            handle_agent_message_start(conversation_id, agent_item_id, &turn_summary_store).await;
+        assert_eq!(suppressed, false);
+
+        handle_turn_plan_update(
+            conversation_id,
+            "turn-1",
+            UpdatePlanArgs {
+                explanation: None,
+                plan: vec![PlanItemArg {
+                    step: "first".to_string(),
+                    status: StepStatus::Pending,
+                }],
+            },
+            ApiVersion::V1,
+            &outgoing,
+            &turn_summary_store,
+        )
+        .await;
+
+        let suppress_existing =
+            should_suppress_agent_message(conversation_id, agent_item_id, &turn_summary_store)
+                .await;
+        assert_eq!(suppress_existing, false);
+
+        let suppress_new =
+            should_suppress_agent_message(conversation_id, "agent-2", &turn_summary_store).await;
+        assert_eq!(suppress_new, true);
+
         Ok(())
     }
 
