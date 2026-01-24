@@ -1835,11 +1835,7 @@ pub enum ThreadItem {
     AgentMessage { id: String, text: String },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
-    Plan {
-        id: String,
-        explanation: Option<String>,
-        plan: Vec<TurnPlanStep>,
-    },
+    Plan { id: String, text: String },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     Reasoning {

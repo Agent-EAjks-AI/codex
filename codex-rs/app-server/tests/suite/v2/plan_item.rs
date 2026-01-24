@@ -12,8 +12,6 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnCompletedNotification;
-use codex_app_server_protocol::TurnPlanStep;
-use codex_app_server_protocol::TurnPlanStepStatus;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
@@ -77,17 +75,7 @@ async fn plan_mode_emits_plan_item_after_plan_update() -> Result<()> {
 
     let expected_plan = ThreadItem::Plan {
         id: format!("{}-plan", turn.id),
-        explanation: Some("Plan it".to_string()),
-        plan: vec![
-            TurnPlanStep {
-                step: "first".to_string(),
-                status: TurnPlanStepStatus::Pending,
-            },
-            TurnPlanStep {
-                step: "second".to_string(),
-                status: TurnPlanStepStatus::InProgress,
-            },
-        ],
+        text: "Final plan".to_string(),
     };
     let plan_items = completed_items
         .iter()
@@ -100,8 +88,8 @@ async fn plan_mode_emits_plan_item_after_plan_update() -> Result<()> {
     assert!(
         completed_items
             .iter()
-            .all(|item| !matches!(item, ThreadItem::AgentMessage { .. })),
-        "plan update should suppress agent message items"
+            .any(|item| matches!(item, ThreadItem::AgentMessage { .. })),
+        "agent message items should still be emitted alongside the plan item"
     );
 
     Ok(())
@@ -124,27 +112,21 @@ async fn plan_mode_without_plan_update_keeps_agent_message() -> Result<()> {
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
-    let _turn = start_plan_mode_turn(&mut mcp).await?;
+    let turn = start_plan_mode_turn(&mut mcp).await?;
     let (_, completed_items, _) = collect_turn_notifications(&mut mcp).await?;
 
-    let expected_agent = ThreadItem::AgentMessage {
-        id: "msg-1".to_string(),
+    let expected_plan = ThreadItem::Plan {
+        id: format!("{}-plan", turn.id),
         text: "Done".to_string(),
     };
-    let agent_items = completed_items
+    let plan_items = completed_items
         .iter()
         .filter_map(|item| match item {
-            ThreadItem::AgentMessage { .. } => Some(item.clone()),
+            ThreadItem::Plan { .. } => Some(item.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(agent_items, vec![expected_agent]);
-    assert!(
-        completed_items
-            .iter()
-            .all(|item| !matches!(item, ThreadItem::Plan { .. })),
-        "no plan item should be emitted without a plan update"
-    );
+    assert_eq!(plan_items, vec![expected_plan]);
 
     Ok(())
 }

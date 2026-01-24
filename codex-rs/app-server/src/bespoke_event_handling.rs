@@ -566,12 +566,13 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::AgentMessageContentDelta(event) => {
-            if should_suppress_agent_message(conversation_id, &event.item_id, &turn_summary_store)
-                .await
-            {
-                // Once we have a plan update in plan mode, we render the synthesized plan item instead.
-                return;
-            }
+            record_plan_output_delta(
+                conversation_id,
+                &event.item_id,
+                &event.delta,
+                &turn_summary_store,
+            )
+            .await;
             let notification = AgentMessageDeltaNotification {
                 thread_id: conversation_id.to_string(),
                 turn_id: event_turn_id.clone(),
@@ -744,16 +745,6 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::ItemStarted(item_started_event) => {
-            if let TurnItem::AgentMessage(agent_message) = &item_started_event.item
-                && handle_agent_message_start(
-                    conversation_id,
-                    &agent_message.id,
-                    &turn_summary_store,
-                )
-                .await
-            {
-                return;
-            }
             let item: ThreadItem = item_started_event.item.clone().into();
             let notification = ItemStartedNotification {
                 thread_id: conversation_id.to_string(),
@@ -765,15 +756,13 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::ItemCompleted(item_completed_event) => {
-            if let TurnItem::AgentMessage(agent_message) = &item_completed_event.item
-                && should_suppress_agent_message(
+            if let TurnItem::AgentMessage(agent_message) = &item_completed_event.item {
+                record_plan_output_from_completion(
                     conversation_id,
-                    &agent_message.id,
+                    agent_message,
                     &turn_summary_store,
                 )
-                .await
-            {
-                return;
+                .await;
             }
             let item: ThreadItem = item_completed_event.item.clone().into();
             let notification = ItemCompletedNotification {
@@ -1106,7 +1095,6 @@ pub(crate) async fn apply_bespoke_event_handling(
                 plan_update_event,
                 api_version,
                 outgoing.as_ref(),
-                &turn_summary_store,
             )
             .await;
         }
@@ -1140,13 +1128,8 @@ async fn handle_turn_plan_update(
     plan_update_event: UpdatePlanArgs,
     api_version: ApiVersion,
     outgoing: &OutgoingMessageSender,
-    turn_summary_store: &TurnSummaryStore,
 ) {
-    {
-        let mut map = turn_summary_store.lock().await;
-        let summary = map.entry(conversation_id).or_default();
-        summary.last_plan_update = Some(plan_update_event.clone());
-    }
+    // `update_plan` is a todo/checklist tool; it is not the signal for plan-mode rendering.
     if let ApiVersion::V2 = api_version {
         let notification = TurnPlanUpdatedNotification {
             thread_id: conversation_id.to_string(),
@@ -1270,59 +1253,74 @@ async fn maybe_emit_raw_response_item_completed(
         .await;
 }
 
-fn plan_mode_with_plan_update_observed(summary: &TurnSummary) -> bool {
-    summary.collaboration_mode_kind == Some(ModeKind::Plan) && summary.last_plan_update.is_some()
+fn is_plan_mode(summary: &TurnSummary) -> bool {
+    summary.collaboration_mode_kind == Some(ModeKind::Plan)
 }
 
-async fn handle_agent_message_start(
+fn agent_message_text(agent_message: &codex_protocol::items::AgentMessageItem) -> String {
+    agent_message
+        .content
+        .iter()
+        .map(|content| match content {
+            codex_protocol::items::AgentMessageContent::Text { text } => text,
+        })
+        .collect()
+}
+
+async fn record_plan_output_delta(
     conversation_id: ThreadId,
     item_id: &str,
+    delta: &str,
+    turn_summary_store: &TurnSummaryStore,
+) {
+    let mut map = turn_summary_store.lock().await;
+    let summary = map.entry(conversation_id).or_default();
+    if !is_plan_mode(summary) {
+        return;
+    }
+    let text = summary
+        .agent_message_text_by_id
+        .entry(item_id.to_string())
+        .or_default();
+    text.push_str(delta);
+    summary.last_agent_message_id = Some(item_id.to_string());
+    // Plan output is derived from the final assistant message, not from update_plan.
+    summary.plan_item_requested = true;
+}
+
+async fn record_plan_output_from_completion(
+    conversation_id: ThreadId,
+    agent_message: &codex_protocol::items::AgentMessageItem,
     turn_summary_store: &TurnSummaryStore,
 ) -> bool {
     let mut map = turn_summary_store.lock().await;
     let summary = map.entry(conversation_id).or_default();
-    if plan_mode_with_plan_update_observed(summary) {
-        // Suppress agent messages that start after we've observed a plan update.
-        return !summary
-            .agent_messages_started_before_plan_update
-            .contains(item_id);
+    if !is_plan_mode(summary) {
+        return false;
     }
-    summary
-        .agent_messages_started_before_plan_update
-        .insert(item_id.to_string());
-    false
-}
-
-async fn should_suppress_agent_message(
-    conversation_id: ThreadId,
-    item_id: &str,
-    turn_summary_store: &TurnSummaryStore,
-) -> bool {
-    let map = turn_summary_store.lock().await;
-    map.get(&conversation_id).is_some_and(|summary| {
-        plan_mode_with_plan_update_observed(summary)
-            && !summary
-                .agent_messages_started_before_plan_update
-                .contains(item_id)
-    })
+    let text = summary
+        .agent_message_text_by_id
+        .entry(agent_message.id.clone())
+        .or_default();
+    if text.is_empty() {
+        *text = agent_message_text(agent_message);
+    }
+    summary.last_agent_message_id = Some(agent_message.id.clone());
+    // Plan output is derived from the final assistant message, not from update_plan.
+    summary.plan_item_requested = true;
+    true
 }
 
 async fn emit_plan_item(
     conversation_id: ThreadId,
     event_turn_id: &str,
-    plan_update: UpdatePlanArgs,
+    text: String,
     outgoing: &OutgoingMessageSender,
 ) {
     let plan_item_id = format!("{event_turn_id}-plan");
-    let plan = plan_update
-        .plan
-        .into_iter()
-        .map(TurnPlanStep::from)
-        .collect();
     let item = ThreadItem::Plan {
         id: plan_item_id,
-        explanation: plan_update.explanation,
-        plan,
+        text,
     };
     let started = ItemStartedNotification {
         thread_id: conversation_id.to_string(),
@@ -1360,8 +1358,10 @@ async fn handle_turn_complete(
 
     let TurnSummary {
         last_error,
-        last_plan_update,
         collaboration_mode_kind,
+        plan_item_requested,
+        agent_message_text_by_id,
+        last_agent_message_id,
         ..
     } = turn_summary;
     let plan_mode = collaboration_mode_kind == Some(ModeKind::Plan);
@@ -1371,11 +1371,12 @@ async fn handle_turn_complete(
         None => (TurnStatus::Completed, None),
     };
 
-    if matches!(status, TurnStatus::Completed)
-        && plan_mode
-        && let Some(plan_update) = last_plan_update
-    {
-        emit_plan_item(conversation_id, &event_turn_id, plan_update, outgoing).await;
+    if matches!(status, TurnStatus::Completed) && plan_mode && plan_item_requested {
+        if let Some(last_id) = last_agent_message_id {
+            if let Some(text) = agent_message_text_by_id.get(&last_id) {
+                emit_plan_item(conversation_id, &event_turn_id, text.clone(), outgoing).await;
+            }
+        }
     }
     emit_turn_completed_with_status(conversation_id, event_turn_id, status, error, outgoing).await;
 }
@@ -1891,8 +1892,6 @@ mod tests {
     use anyhow::Result;
     use anyhow::anyhow;
     use anyhow::bail;
-    use codex_app_server_protocol::TurnPlanStep;
-    use codex_app_server_protocol::TurnPlanStepStatus;
     use codex_core::protocol::CreditsSnapshot;
     use codex_core::protocol::McpInvocation;
     use codex_core::protocol::RateLimitSnapshot;
@@ -1900,8 +1899,6 @@ mod tests {
     use codex_core::protocol::TokenUsage;
     use codex_core::protocol::TokenUsageInfo;
     use codex_protocol::config_types::ModeKind;
-    use codex_protocol::plan_tool::PlanItemArg;
-    use codex_protocol::plan_tool::StepStatus;
     use mcp_types::CallToolResult;
     use mcp_types::ContentBlock;
     use mcp_types::TextContent;
@@ -2079,7 +2076,6 @@ mod tests {
     async fn test_handle_turn_plan_update_emits_notification_for_v2() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let outgoing = OutgoingMessageSender::new(tx);
-        let turn_summary_store = new_turn_summary_store();
         let update = UpdatePlanArgs {
             explanation: Some("need plan".to_string()),
             plan: vec![
@@ -2102,16 +2098,8 @@ mod tests {
             update,
             ApiVersion::V2,
             &outgoing,
-            &turn_summary_store,
         )
         .await;
-
-        let map = turn_summary_store.lock().await;
-        let summary = map
-            .get(&conversation_id)
-            .ok_or_else(|| anyhow!("summary should exist"))?;
-        assert!(summary.last_plan_update.is_some());
-        drop(map);
 
         let msg = rx
             .recv()
@@ -2142,30 +2130,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let outgoing = Arc::new(OutgoingMessageSender::new(tx));
 
-        let explanation = Some("plan it".to_string());
-        let plan_update = UpdatePlanArgs {
-            explanation: explanation.clone(),
-            plan: vec![
-                PlanItemArg {
-                    step: "first".to_string(),
-                    status: StepStatus::Pending,
-                },
-                PlanItemArg {
-                    step: "second".to_string(),
-                    status: StepStatus::Completed,
-                },
-            ],
-        };
-        let expected_plan = plan_update
-            .plan
-            .clone()
-            .into_iter()
-            .map(TurnPlanStep::from)
-            .collect();
+        let plan_text = "Final plan text".to_string();
         let expected_item = ThreadItem::Plan {
             id: format!("{event_turn_id}-plan"),
-            explanation,
-            plan: expected_plan,
+            text: plan_text.clone(),
         };
 
         {
@@ -2173,8 +2141,13 @@ mod tests {
             map.insert(
                 conversation_id,
                 TurnSummary {
-                    last_plan_update: Some(plan_update),
                     collaboration_mode_kind: Some(ModeKind::Plan),
+                    plan_item_requested: true,
+                    agent_message_text_by_id: HashMap::from([(
+                        "agent-1".to_string(),
+                        plan_text.clone(),
+                    )]),
+                    last_agent_message_id: Some("agent-1".to_string()),
                     ..Default::default()
                 },
             );
@@ -2223,57 +2196,6 @@ mod tests {
             other => bail!("unexpected message: {other:?}"),
         }
         assert!(rx.try_recv().is_err(), "no extra messages expected");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn plan_update_does_not_strand_started_agent_message() -> Result<()> {
-        let conversation_id = ThreadId::new();
-        let turn_summary_store = new_turn_summary_store();
-        let (tx, _rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = OutgoingMessageSender::new(tx);
-
-        {
-            let mut map = turn_summary_store.lock().await;
-            map.insert(
-                conversation_id,
-                TurnSummary {
-                    collaboration_mode_kind: Some(ModeKind::Plan),
-                    ..Default::default()
-                },
-            );
-        }
-
-        let agent_item_id = "agent-1";
-        let suppressed =
-            handle_agent_message_start(conversation_id, agent_item_id, &turn_summary_store).await;
-        assert_eq!(suppressed, false);
-
-        handle_turn_plan_update(
-            conversation_id,
-            "turn-1",
-            UpdatePlanArgs {
-                explanation: None,
-                plan: vec![PlanItemArg {
-                    step: "first".to_string(),
-                    status: StepStatus::Pending,
-                }],
-            },
-            ApiVersion::V1,
-            &outgoing,
-            &turn_summary_store,
-        )
-        .await;
-
-        let suppress_existing =
-            should_suppress_agent_message(conversation_id, agent_item_id, &turn_summary_store)
-                .await;
-        assert_eq!(suppress_existing, false);
-
-        let suppress_new =
-            should_suppress_agent_message(conversation_id, "agent-2", &turn_summary_store).await;
-        assert_eq!(suppress_new, true);
-
         Ok(())
     }
 
