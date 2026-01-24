@@ -76,6 +76,7 @@ For complete documentation of the `Op` and `EventMsg` variants, refer to [protoc
   - `EventMsg::AgentMessage` – Messages from the `Model`
   - `EventMsg::ExecApprovalRequest` – Request approval from user to execute a command
   - `EventMsg::RequestUserInput` – Request user input for a tool call
+  - `EventMsg::TurnStarted` – Turn start metadata including `model_context_window` and `collaboration_mode_kind`
   - `EventMsg::TurnComplete` – A turn completed successfully
   - `EventMsg::Error` – A turn stopped with an error
   - `EventMsg::Warning` – A non-fatal warning that the client should surface to the user
