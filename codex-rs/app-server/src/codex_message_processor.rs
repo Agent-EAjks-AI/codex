@@ -169,9 +169,11 @@ use codex_login::ShutdownHandle;
 use codex_login::run_login_server;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ForcedLoginMethod;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::GitInfo as CoreGitInfo;
 use codex_protocol::protocol::McpAuthStatus as CoreMcpAuthStatus;
 use codex_protocol::protocol::McpServerRefreshConfig;
@@ -212,9 +214,11 @@ pub(crate) type PendingRollbacks = Arc<Mutex<HashMap<ThreadId, RequestId>>>;
 pub(crate) struct TurnSummary {
     pub(crate) file_change_started: HashSet<String>,
     pub(crate) last_error: Option<TurnError>,
+    pub(crate) last_plan_update: Option<UpdatePlanArgs>,
 }
 
 pub(crate) type TurnSummaryStore = Arc<Mutex<HashMap<ThreadId, TurnSummary>>>;
+pub(crate) type CollaborationModeKindStore = Arc<Mutex<HashMap<ThreadId, ModeKind>>>;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -253,6 +257,7 @@ pub(crate) struct CodexMessageProcessor {
     // Queue of pending rollback requests per conversation. We reply when ThreadRollback arrives.
     pending_rollbacks: PendingRollbacks,
     turn_summary_store: TurnSummaryStore,
+    collaboration_mode_store: CollaborationModeKindStore,
     pending_fuzzy_searches: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     feedback: CodexFeedback,
 }
@@ -309,6 +314,7 @@ impl CodexMessageProcessor {
             pending_interrupts: Arc::new(Mutex::new(HashMap::new())),
             pending_rollbacks: Arc::new(Mutex::new(HashMap::new())),
             turn_summary_store: Arc::new(Mutex::new(HashMap::new())),
+            collaboration_mode_store: Arc::new(Mutex::new(HashMap::new())),
             pending_fuzzy_searches: Arc::new(Mutex::new(HashMap::new())),
             feedback,
         }
@@ -3601,7 +3607,7 @@ impl CodexMessageProcessor {
     }
 
     async fn turn_start(&self, request_id: RequestId, params: TurnStartParams) {
-        let (_, thread) = match self.load_thread(&params.thread_id).await {
+        let (thread_id, thread) = match self.load_thread(&params.thread_id).await {
             Ok(v) => v,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -3615,6 +3621,11 @@ impl CodexMessageProcessor {
             .into_iter()
             .map(V2UserInput::into_core)
             .collect();
+
+        if let Some(mode_kind) = params.collaboration_mode.as_ref().map(|mode| mode.mode) {
+            let mut store = self.collaboration_mode_store.lock().await;
+            store.insert(thread_id, mode_kind);
+        }
 
         let has_any_overrides = params.cwd.is_some()
             || params.approval_policy.is_some()
@@ -4003,7 +4014,9 @@ impl CodexMessageProcessor {
         let pending_interrupts = self.pending_interrupts.clone();
         let pending_rollbacks = self.pending_rollbacks.clone();
         let turn_summary_store = self.turn_summary_store.clone();
+        let collaboration_mode_store = self.collaboration_mode_store.clone();
         let api_version_for_task = api_version;
+        let default_mode_kind = self.config.experimental_mode.unwrap_or(ModeKind::Custom);
         let fallback_model_provider = self.config.model_provider_id.clone();
         tokio::spawn(async move {
             loop {
@@ -4066,6 +4079,8 @@ impl CodexMessageProcessor {
                             pending_interrupts.clone(),
                             pending_rollbacks.clone(),
                             turn_summary_store.clone(),
+                            collaboration_mode_store.clone(),
+                            default_mode_kind,
                             api_version_for_task,
                             fallback_model_provider.clone(),
                         )
