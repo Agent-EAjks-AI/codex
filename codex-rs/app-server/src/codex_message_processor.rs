@@ -214,6 +214,8 @@ pub(crate) struct TurnSummary {
     pub(crate) file_change_started: HashSet<String>,
     pub(crate) last_error: Option<TurnError>,
     pub(crate) collaboration_mode_kind: Option<ModeKind>,
+    /// Last completed assistant message id observed for this turn.
+    pub(crate) last_agent_message_id: Option<String>,
     /// Last completed assistant message text observed for this turn.
     pub(crate) last_agent_message_text: Option<String>,
 }

@@ -76,6 +76,7 @@ async fn plan_mode_emits_plan_item_after_plan_update() -> Result<()> {
     let expected_plan = ThreadItem::Plan {
         id: format!("{}-plan", turn.id),
         text: "Final plan".to_string(),
+        agent_message_id: "msg-1".to_string(),
     };
     let plan_items = completed_items
         .iter()
@@ -118,6 +119,7 @@ async fn plan_mode_without_plan_update_keeps_agent_message() -> Result<()> {
     let expected_plan = ThreadItem::Plan {
         id: format!("{}-plan", turn.id),
         text: "Done".to_string(),
+        agent_message_id: "msg-1".to_string(),
     };
     let plan_items = completed_items
         .iter()
