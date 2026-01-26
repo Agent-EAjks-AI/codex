@@ -381,6 +381,14 @@ enum RateLimitSwitchPromptState {
     Shown,
 }
 
+#[derive(Default)]
+enum PersonalityNudgeState {
+    #[default]
+    Idle,
+    Pending,
+    Shown,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ExternalEditorState {
     #[default]
@@ -433,6 +441,7 @@ pub(crate) struct ChatWidget {
     plan_type: Option<PlanType>,
     rate_limit_warnings: RateLimitWarningState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
+    personality_nudge: PersonalityNudgeState,
     rate_limit_poller: Option<JoinHandle<()>>,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
@@ -740,6 +749,7 @@ impl ChatWidget {
         );
         self.refresh_model_display();
         self.sync_personality_command_enabled();
+        self.schedule_personality_nudge_if_needed();
         let session_info_cell = history_cell::new_session_info(
             &self.config,
             &model_for_header,
@@ -899,7 +909,7 @@ impl ChatWidget {
             response: last_agent_message.unwrap_or_default(),
         });
 
-        self.maybe_show_pending_rate_limit_prompt();
+        self.maybe_show_post_turn_nudges();
     }
 
     fn maybe_prompt_plan_implementation(&mut self, last_agent_message: Option<&str>) {
@@ -1104,7 +1114,7 @@ impl ChatWidget {
         self.unified_exec_wait_streak = None;
         self.clear_unified_exec_processes();
         self.stream_controller = None;
-        self.maybe_show_pending_rate_limit_prompt();
+        self.maybe_show_post_turn_nudges();
     }
 
     fn on_error(&mut self, message: String) {
@@ -1983,6 +1993,7 @@ impl ChatWidget {
             plan_type: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
+            personality_nudge: PersonalityNudgeState::default(),
             rate_limit_poller: None,
             stream_controller: None,
             running_commands: HashMap::new(),
@@ -2108,6 +2119,7 @@ impl ChatWidget {
             plan_type: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
+            personality_nudge: PersonalityNudgeState::default(),
             rate_limit_poller: None,
             stream_controller: None,
             running_commands: HashMap::new(),
@@ -2234,6 +2246,7 @@ impl ChatWidget {
             plan_type: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
+            personality_nudge: PersonalityNudgeState::default(),
             rate_limit_poller: None,
             stream_controller: None,
             running_commands: HashMap::new(),
@@ -3280,6 +3293,23 @@ impl ChatWidget {
             .unwrap_or(false)
     }
 
+    fn maybe_show_post_turn_nudges(&mut self) {
+        let rate_limit_was_pending = matches!(
+            self.rate_limit_switch_prompt,
+            RateLimitSwitchPromptState::Pending
+        );
+        self.maybe_show_pending_rate_limit_prompt();
+        if rate_limit_was_pending
+            && matches!(
+                self.rate_limit_switch_prompt,
+                RateLimitSwitchPromptState::Shown
+            )
+        {
+            return;
+        }
+        self.maybe_show_pending_personality_nudge();
+    }
+
     fn maybe_show_pending_rate_limit_prompt(&mut self) {
         if self.rate_limit_switch_prompt_hidden() {
             self.rate_limit_switch_prompt = RateLimitSwitchPromptState::Idle;
@@ -3365,6 +3395,78 @@ impl ChatWidget {
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Approaching rate limits".to_string()),
             subtitle: Some(format!("Switch to {display_name} for lower credit usage?")),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    fn personality_nudge_hidden(&self) -> bool {
+        self.config.notices.hide_personality_nudge.unwrap_or(false)
+    }
+
+    fn schedule_personality_nudge_if_needed(&mut self) {
+        if !self.is_session_configured() {
+            return;
+        }
+        if self.personality_nudge_hidden() {
+            self.personality_nudge = PersonalityNudgeState::Idle;
+            return;
+        }
+        if self.config.model_personality.is_some() || !self.current_model_supports_personality() {
+            self.personality_nudge = PersonalityNudgeState::Idle;
+            return;
+        }
+        if matches!(self.personality_nudge, PersonalityNudgeState::Shown) {
+            return;
+        }
+        self.personality_nudge = PersonalityNudgeState::Pending;
+    }
+
+    fn maybe_show_pending_personality_nudge(&mut self) {
+        if self.personality_nudge_hidden() {
+            self.personality_nudge = PersonalityNudgeState::Idle;
+            return;
+        }
+        if !matches!(self.personality_nudge, PersonalityNudgeState::Pending) {
+            return;
+        }
+        if self.config.model_personality.is_some() || !self.current_model_supports_personality() {
+            self.personality_nudge = PersonalityNudgeState::Idle;
+            return;
+        }
+
+        self.open_personality_nudge();
+        self.personality_nudge = PersonalityNudgeState::Shown;
+        self.app_event_tx
+            .send(AppEvent::UpdatePersonalityNudgeHidden(true));
+        self.app_event_tx
+            .send(AppEvent::PersistPersonalityNudgeHidden);
+    }
+
+    fn open_personality_nudge(&mut self) {
+        let choose_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
+            tx.send(AppEvent::OpenPersonalityPopup);
+        })];
+        let items = vec![
+            SelectionItem {
+                name: "Choose a personality".to_string(),
+                description: Some("Pick Friendly or Pragmatic for future responses.".to_string()),
+                actions: choose_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Not now".to_string(),
+                description: Some("You can run /personality any time.".to_string()),
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("New: response personalities".to_string()),
+            subtitle: Some("Prefer a different style? Try /personality.".to_string()),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             ..Default::default()
@@ -4671,6 +4773,13 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn set_personality_nudge_hidden(&mut self, hidden: bool) {
+        self.config.notices.hide_personality_nudge = Some(hidden);
+        if hidden {
+            self.personality_nudge = PersonalityNudgeState::Idle;
+        }
+    }
+
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn world_writable_warning_hidden(&self) -> bool {
         self.config
@@ -4694,6 +4803,7 @@ impl ChatWidget {
     /// Set the personality in the widget's config copy.
     pub(crate) fn set_personality(&mut self, personality: Personality) {
         self.config.model_personality = Some(personality);
+        self.personality_nudge = PersonalityNudgeState::Idle;
     }
 
     /// Set the model in the widget's config copy and stored collaboration mode.
@@ -4708,6 +4818,7 @@ impl ChatWidget {
         }
         self.refresh_model_display();
         self.sync_personality_command_enabled();
+        self.schedule_personality_nudge_if_needed();
     }
 
     pub(crate) fn current_model(&self) -> &str {
