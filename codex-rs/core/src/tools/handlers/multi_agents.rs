@@ -91,6 +91,7 @@ mod spawn {
     use crate::agent::role::apply_role_to_config;
 
     use crate::agent::exceeds_thread_spawn_depth_limit;
+    use crate::agent::max_thread_spawn_depth;
     use crate::agent::next_thread_spawn_depth;
     use std::sync::Arc;
 
@@ -122,7 +123,8 @@ mod spawn {
         let prompt = input_preview(&input_items);
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
-        if exceeds_thread_spawn_depth_limit(child_depth) {
+        let max_depth = max_thread_spawn_depth(turn.config.agent_max_spawn_depth);
+        if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
             return Err(FunctionCallError::RespondToModel(
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
             ));
@@ -849,7 +851,7 @@ mod tests {
     use crate::AuthManager;
     use crate::CodexAuth;
     use crate::ThreadManager;
-    use crate::agent::MAX_THREAD_SPAWN_DEPTH;
+    use crate::agent::max_thread_spawn_depth;
     use crate::built_in_model_providers;
     use crate::codex::make_session_and_context;
     use crate::config::types::ShellEnvironmentPolicy;
@@ -1062,9 +1064,10 @@ mod tests {
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
 
+        let max_depth = max_thread_spawn_depth(turn.config.agent_max_spawn_depth);
         turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: session.conversation_id,
-            depth: MAX_THREAD_SPAWN_DEPTH,
+            depth: max_depth,
         });
 
         let invocation = invocation(
