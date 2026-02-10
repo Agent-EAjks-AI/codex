@@ -109,6 +109,7 @@ pub use codex_git::GhostSnapshotConfig;
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
 pub(crate) const DEFAULT_AGENT_MAX_SPAWN_DEPTH: Option<usize> = Some(2);
+pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -308,6 +309,8 @@ pub struct Config {
     pub agent_max_threads: Option<usize>,
     /// Maximum depth for thread-spawned subagents.
     pub agent_max_spawn_depth: Option<usize>,
+    /// Maximum runtime in seconds for agent job workers before they are failed.
+    pub agent_job_max_runtime_seconds: Option<u64>,
 
     /// User-defined role declarations keyed by role name.
     pub agent_roles: BTreeMap<String, AgentRoleConfig>,
@@ -1183,6 +1186,10 @@ pub struct AgentsToml {
     #[schemars(range(min = 1))]
     pub max_spawn_depth: Option<usize>,
 
+    /// Default maximum runtime in seconds for agent job workers.
+    #[schemars(range(min = 1))]
+    pub job_max_runtime_seconds: Option<u64>,
+
     /// User-defined role declarations keyed by role name.
     ///
     /// Example:
@@ -1700,6 +1707,25 @@ impl Config {
                 "agents.max_spawn_depth must fit within a 32-bit signed integer",
             ));
         }
+        let agent_job_max_runtime_seconds = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.job_max_runtime_seconds)
+            .or(DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS);
+        if agent_job_max_runtime_seconds == Some(0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "agents.job_max_runtime_seconds must be at least 1",
+            ));
+        }
+        if let Some(max_runtime_seconds) = agent_job_max_runtime_seconds
+            && max_runtime_seconds > i64::MAX as u64
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "agents.job_max_runtime_seconds must fit within a 64-bit signed integer",
+            ));
+        }
 
         let ghost_snapshot = {
             let mut config = GhostSnapshotConfig::default();
@@ -1917,6 +1943,7 @@ impl Config {
             agent_roles,
             memories: cfg.memories.unwrap_or_default().into(),
             agent_max_spawn_depth,
+            agent_job_max_runtime_seconds,
             codex_home,
             log_dir,
             config_layer_stack,
@@ -4345,6 +4372,7 @@ model_verbosity = "high"
                 agent_roles: BTreeMap::new(),
                 memories: MemoriesConfig::default(),
                 agent_max_spawn_depth: DEFAULT_AGENT_MAX_SPAWN_DEPTH,
+                agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
                 codex_home: fixture.codex_home(),
                 log_dir: fixture.codex_home().join("log"),
                 config_layer_stack: Default::default(),
@@ -4460,6 +4488,7 @@ model_verbosity = "high"
             agent_roles: BTreeMap::new(),
             memories: MemoriesConfig::default(),
             agent_max_spawn_depth: DEFAULT_AGENT_MAX_SPAWN_DEPTH,
+            agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
             codex_home: fixture.codex_home(),
             log_dir: fixture.codex_home().join("log"),
             config_layer_stack: Default::default(),
@@ -4573,6 +4602,7 @@ model_verbosity = "high"
             agent_roles: BTreeMap::new(),
             memories: MemoriesConfig::default(),
             agent_max_spawn_depth: DEFAULT_AGENT_MAX_SPAWN_DEPTH,
+            agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
             codex_home: fixture.codex_home(),
             log_dir: fixture.codex_home().join("log"),
             config_layer_stack: Default::default(),
@@ -4672,6 +4702,7 @@ model_verbosity = "high"
             agent_roles: BTreeMap::new(),
             memories: MemoriesConfig::default(),
             agent_max_spawn_depth: DEFAULT_AGENT_MAX_SPAWN_DEPTH,
+            agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
             codex_home: fixture.codex_home(),
             log_dir: fixture.codex_home().join("log"),
             config_layer_stack: Default::default(),
