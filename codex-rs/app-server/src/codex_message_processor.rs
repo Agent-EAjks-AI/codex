@@ -3394,8 +3394,7 @@ impl CodexMessageProcessor {
         params: ModelListParams,
     ) {
         let ModelListParams { limit, cursor } = params;
-        let mut config = (*config).clone();
-        config.features.enable(Feature::RemoteModels);
+        let config = (*config).clone();
         let models = supported_models(thread_manager, &config).await;
         let total = models.len();
 
