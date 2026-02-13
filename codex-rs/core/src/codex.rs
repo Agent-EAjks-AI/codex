@@ -14,6 +14,7 @@ use crate::agent::AgentStatus;
 use crate::agent::MAX_THREAD_SPAWN_DEPTH;
 use crate::agent::agent_status_from_event;
 use crate::analytics_client::AnalyticsEventsClient;
+use crate::analytics_client::AppInvocation;
 use crate::analytics_client::build_track_events_context;
 use crate::apps::render_apps_section;
 use crate::compact;
@@ -37,8 +38,7 @@ use crate::stream_events_utils::handle_output_item_done;
 use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::terminal;
 use crate::truncate::TruncationPolicy;
-use crate::turn_metadata::build_turn_metadata_header;
-use crate::turn_metadata::resolve_turn_metadata_header_with_timeout;
+use crate::turn_metadata::TurnMetadataState;
 use crate::util::error_or_panic;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -73,6 +73,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
+use codex_protocol::protocol::TurnContextNetworkItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputResponse;
@@ -90,7 +91,6 @@ use rmcp::model::RequestId;
 use serde_json;
 use serde_json::Value;
 use tokio::sync::Mutex;
-use tokio::sync::OnceCell;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -114,6 +114,7 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::compact::collect_user_messages;
+use crate::config::CONFIG_TOML_FILE;
 use crate::config::Config;
 use crate::config::Constrained;
 use crate::config::ConstraintResult;
@@ -246,6 +247,7 @@ use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_readiness::Readiness;
 use codex_utils_readiness::ReadinessFlag;
 
@@ -389,8 +391,8 @@ impl Codex {
             personality: config.personality,
             base_instructions,
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy.clone(),
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: config.permissions.approval_policy.clone(),
+            sandbox_policy: config.permissions.sandbox_policy.clone(),
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -519,9 +521,6 @@ pub(crate) struct Session {
     next_internal_sub_id: AtomicU64,
 }
 
-const SEARCH_TOOL_DEVELOPER_INSTRUCTIONS: &str =
-    include_str!("../templates/search_tool/developer_instructions.md");
-
 /// The context needed for a single turn of the thread.
 #[derive(Debug)]
 pub(crate) struct TurnContext {
@@ -557,7 +556,7 @@ pub(crate) struct TurnContext {
     pub(crate) truncation_policy: TruncationPolicy,
     pub(crate) js_repl: Arc<JsReplHandle>,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
-    turn_metadata_header: OnceCell<Option<String>>,
+    turn_metadata_state: Arc<TurnMetadataState>,
 }
 impl TurnContext {
     pub(crate) fn model_context_window(&self) -> Option<i64> {
@@ -637,7 +636,7 @@ impl TurnContext {
             truncation_policy,
             js_repl: Arc::clone(&self.js_repl),
             dynamic_tools: self.dynamic_tools.clone(),
-            turn_metadata_header: self.turn_metadata_header.clone(),
+            turn_metadata_state: self.turn_metadata_state.clone(),
         }
     }
 
@@ -653,39 +652,51 @@ impl TurnContext {
             .unwrap_or(compact::SUMMARIZATION_PROMPT)
     }
 
-    async fn build_turn_metadata_header(&self) -> Option<String> {
-        let sandbox = sandbox_tag(&self.sandbox_policy, self.windows_sandbox_level);
-        self.turn_metadata_header
-            .get_or_init(|| async {
-                build_turn_metadata_header(self.cwd.as_path(), Some(sandbox)).await
-            })
-            .await
-            .clone()
+    pub(crate) fn to_turn_context_item(
+        &self,
+        collaboration_mode: CollaborationMode,
+    ) -> TurnContextItem {
+        TurnContextItem {
+            turn_id: Some(self.sub_id.clone()),
+            cwd: self.cwd.clone(),
+            approval_policy: self.approval_policy,
+            sandbox_policy: self.sandbox_policy.clone(),
+            network: self.turn_context_network_item(),
+            model: self.model_info.slug.clone(),
+            personality: self.personality,
+            collaboration_mode: Some(collaboration_mode),
+            effort: self.reasoning_effort,
+            summary: self.reasoning_summary,
+            user_instructions: self.user_instructions.clone(),
+            developer_instructions: self.developer_instructions.clone(),
+            final_output_json_schema: self.final_output_json_schema.clone(),
+            truncation_policy: Some(self.truncation_policy.into()),
+        }
     }
 
-    /// Resolves the per-turn metadata header under a shared timeout policy.
-    ///
-    /// This uses the same timeout helper as websocket startup prewarm so both turn execution and
-    /// background prewarm observe identical "timeout means best-effort fallback" behavior.
-    pub async fn resolve_turn_metadata_header(&self) -> Option<String> {
-        resolve_turn_metadata_header_with_timeout(
-            self.build_turn_metadata_header(),
-            self.turn_metadata_header.get().cloned().flatten(),
-        )
-        .await
+    fn turn_context_network_item(&self) -> Option<TurnContextNetworkItem> {
+        let network = self
+            .config
+            .config_layer_stack
+            .requirements()
+            .network
+            .as_ref()?;
+        Some(TurnContextNetworkItem {
+            allowed_domains: network.allowed_domains.clone().unwrap_or_default(),
+            denied_domains: network.denied_domains.clone().unwrap_or_default(),
+        })
     }
 
-    /// Starts best-effort background computation of turn metadata.
-    ///
-    /// This warms the cached value used by [`TurnContext::resolve_turn_metadata_header`] so turns
-    /// and websocket prewarm are less likely to pay metadata construction latency on demand.
-    pub fn spawn_turn_metadata_header_task(self: &Arc<Self>) {
-        let context = Arc::clone(self);
-        tokio::spawn(async move {
-            trace!("Spawning turn metadata calculation task");
-            context.build_turn_metadata_header().await;
-            trace!("Turn metadata calculation task completed");
-        });
+    pub fn current_turn_metadata_header(&self) -> Option<String> {
+        self.turn_metadata_state.current_header_value()
+    }
+
+    pub fn spawn_turn_metadata_enrichment_task(self: &Arc<Self>) {
+        self.turn_metadata_state.spawn_git_enrichment_task();
+    }
+
+    pub fn cancel_turn_metadata_enrichment_task(&self) {
+        self.turn_metadata_state.cancel_git_enrichment_task();
     }
 }
 
@@ -912,6 +923,17 @@ impl Session {
         });
 
         let cwd = session_configuration.cwd.clone();
+        let turn_metadata_state = Arc::new(TurnMetadataState::new(
+            sub_id.clone(),
+            cwd.clone(),
+            Some(
+                sandbox_tag(
+                    session_configuration.sandbox_policy.get(),
+                    session_configuration.windows_sandbox_level,
+                )
+                .to_string(),
+            ),
+        ));
         TurnContext {
             sub_id,
             config: per_turn_config.clone(),
@@ -932,7 +954,7 @@ impl Session {
             sandbox_policy: session_configuration.sandbox_policy.get().clone(),
             network,
             windows_sandbox_level: session_configuration.windows_sandbox_level,
-            shell_environment_policy: per_turn_config.shell_environment_policy.clone(),
+            shell_environment_policy: per_turn_config.permissions.shell_environment_policy.clone(),
             tools_config,
             features: per_turn_config.features.clone(),
             ghost_snapshot: per_turn_config.ghost_snapshot.clone(),
@@ -942,7 +964,7 @@ impl Session {
             truncation_policy: model_info.truncation_policy.into(),
             js_repl,
             dynamic_tools: session_configuration.dynamic_tools.clone(),
-            turn_metadata_header: OnceCell::new(),
+            turn_metadata_state,
         }
     }
 
@@ -1099,6 +1121,14 @@ impl Session {
             });
         }
         maybe_push_unstable_features_warning(&config, &mut post_session_configured_events);
+        if config.permissions.approval_policy.value() == AskForApproval::OnFailure {
+            post_session_configured_events.push(Event {
+                id: "".to_owned(),
+                msg: EventMsg::Warning(WarningEvent {
+                    message: "`on-failure` approval policy is deprecated and will be removed in a future release. Use `on-request` for interactive approvals or `never` for non-interactive runs.".to_string(),
+                }),
+            });
+        }
 
         let auth = auth.as_ref();
         let auth_mode = auth.map(CodexAuth::auth_mode).map(TelemetryAuthMode::from);
@@ -1134,8 +1164,8 @@ impl Session {
             config.model_reasoning_summary,
             config.model_context_window,
             config.model_auto_compact_token_limit,
-            config.approval_policy.value(),
-            config.sandbox_policy.get().clone(),
+            config.permissions.approval_policy.value(),
+            config.permissions.sandbox_policy.get().clone(),
             mcp_servers.keys().map(String::as_str).collect(),
             config.active_profile.clone(),
         );
@@ -1167,7 +1197,7 @@ impl Session {
         session_configuration.thread_name = thread_name.clone();
         let mut state = SessionState::new(session_configuration.clone());
         let network_proxy =
-            match config.network.as_ref() {
+            match config.permissions.network.as_ref() {
                 Some(spec) => Some(spec.start_proxy().await.map_err(|err| {
                     anyhow::anyhow!("failed to start managed network proxy: {err}")
                 })?),
@@ -1229,17 +1259,10 @@ impl Session {
         let prewarm_model_info = models_manager
             .get_model_info(session_configuration.collaboration_mode.model(), &config)
             .await;
-        let prewarm_cwd = session_configuration.cwd.clone();
-        let turn_metadata_header = resolve_turn_metadata_header_with_timeout(
-            async move { build_turn_metadata_header(prewarm_cwd.as_path(), None).await },
-            None,
-        )
-        .boxed();
         let startup_regular_task = RegularTask::with_startup_prewarm(
             services.model_client.clone(),
             services.otel_manager.clone(),
             prewarm_model_info,
-            turn_metadata_header,
         );
         state.set_startup_regular_task(startup_regular_task);
 
@@ -1689,7 +1712,7 @@ impl Session {
 
         if sandbox_policy_changed {
             let sandbox_state = SandboxState {
-                sandbox_policy: per_turn_config.sandbox_policy.get().clone(),
+                sandbox_policy: per_turn_config.permissions.sandbox_policy.get().clone(),
                 codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
                 sandbox_cwd: per_turn_config.cwd.clone(),
                 use_linux_sandbox_bwrap: per_turn_config
@@ -1735,7 +1758,7 @@ impl Session {
             turn_context.final_output_json_schema = final_schema;
         }
         let turn_context = Arc::new(turn_context);
-        turn_context.spawn_turn_metadata_header_task();
+        turn_context.spawn_turn_metadata_enrichment_task();
         turn_context
     }
 
@@ -1755,6 +1778,48 @@ impl Session {
             .session_configuration
             .original_config_do_not_use
             .clone()
+    }
+
+    pub(crate) async fn reload_user_config_layer(&self) {
+        let config_toml_path = {
+            let state = self.state.lock().await;
+            state
+                .session_configuration
+                .codex_home
+                .join(CONFIG_TOML_FILE)
+        };
+
+        let user_config = match std::fs::read_to_string(&config_toml_path) {
+            Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
+                Ok(config) => config,
+                Err(err) => {
+                    warn!("failed to parse user config while reloading layer: {err}");
+                    return;
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                toml::Value::Table(Default::default())
+            }
+            Err(err) => {
+                warn!("failed to read user config while reloading layer: {err}");
+                return;
+            }
+        };
+
+        let config_toml_path = match AbsolutePathBuf::try_from(config_toml_path) {
+            Ok(path) => path,
+            Err(err) => {
+                warn!("failed to resolve user config path while reloading layer: {err}");
+                return;
+            }
+        };
+
+        let mut state = self.state.lock().await;
+        let mut config = (*state.session_configuration.original_config_do_not_use).clone();
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_user_config(&config_toml_path, user_config);
+        state.session_configuration.original_config_do_not_use = Arc::new(config);
     }
 
     pub(crate) async fn new_default_turn_with_sub_id(&self, sub_id: String) -> Arc<TurnContext> {
@@ -2421,11 +2486,6 @@ impl Session {
         if let Some(developer_instructions) = turn_context.developer_instructions.as_deref() {
             items.push(DeveloperInstructions::new(developer_instructions.to_string()).into());
         }
-        if turn_context.tools_config.search_tool {
-            items.push(
-                DeveloperInstructions::new(SEARCH_TOOL_DEVELOPER_INSTRUCTIONS.to_string()).into(),
-            );
-        }
         // Add developer instructions for memories.
         if let Some(memory_prompt) =
             build_memory_tool_developer_instructions(&turn_context.config.codex_home).await
@@ -3042,6 +3102,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::RefreshMcpServers { config } => {
                 handlers::refresh_mcp_servers(&sess, config).await;
             }
+            Op::ReloadUserConfig => {
+                handlers::reload_user_config(&sess).await;
+            }
             Op::ListCustomPrompts => {
                 handlers::list_custom_prompts(&sess, sub.id.clone()).await;
             }
@@ -3464,6 +3527,10 @@ mod handlers {
     pub async fn refresh_mcp_servers(sess: &Arc<Session>, refresh_config: McpServerRefreshConfig) {
         let mut guard = sess.pending_mcp_server_refresh_config.lock().await;
         *guard = Some(refresh_config);
+    }
+
+    pub async fn reload_user_config(sess: &Arc<Session>) {
+        sess.reload_user_config_layer().await;
     }
 
     pub async fn list_mcp_tools(sess: &Session, config: &Arc<Config>, sub_id: String) {
@@ -3938,9 +4005,21 @@ async fn spawn_review_thread(
     let session_source = parent_turn_context.session_source.clone();
 
     let per_turn_config = Arc::new(per_turn_config);
+    let review_turn_id = sub_id.to_string();
+    let turn_metadata_state = Arc::new(TurnMetadataState::new(
+        review_turn_id.clone(),
+        parent_turn_context.cwd.clone(),
+        Some(
+            sandbox_tag(
+                &parent_turn_context.sandbox_policy,
+                parent_turn_context.windows_sandbox_level,
+            )
+            .to_string(),
+        ),
+    ));
 
     let review_turn_context = TurnContext {
-        sub_id: sub_id.to_string(),
+        sub_id: review_turn_id,
         config: per_turn_config,
         auth_manager: auth_manager_for_context,
         model_info: model_info.clone(),
@@ -3969,7 +4048,7 @@ async fn spawn_review_thread(
         js_repl: Arc::clone(&sess.js_repl),
         dynamic_tools: parent_turn_context.dynamic_tools.clone(),
         truncation_policy: model_info.truncation_policy.into(),
-        turn_metadata_header: parent_turn_context.turn_metadata_header.clone(),
+        turn_metadata_state,
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -3979,6 +4058,7 @@ async fn spawn_review_thread(
         text_elements: Vec::new(),
     }];
     let tc = Arc::new(review_turn_context);
+    tc.spawn_turn_metadata_enrichment_task();
     sess.spawn_task(tc.clone(), input, ReviewTask::new()).await;
 
     // Announce entering review mode so UIs can switch modes.
@@ -4106,7 +4186,10 @@ pub(crate) async fn run_turn(
             Ok(mcp_tools) => mcp_tools,
             Err(_) => return None,
         };
-        connectors::accessible_connectors_from_mcp_tools(&mcp_tools)
+        connectors::with_app_enabled_state(
+            connectors::accessible_connectors_from_mcp_tools(&mcp_tools),
+            &turn_context.config,
+        )
     } else {
         Vec::new()
     };
@@ -4143,7 +4226,11 @@ pub(crate) async fn run_turn(
 
     let otel_manager = turn_context.otel_manager.clone();
     let thread_id = sess.conversation_id.to_string();
-    let tracking = build_track_events_context(turn_context.model_info.slug.clone(), thread_id);
+    let tracking = build_track_events_context(
+        turn_context.model_info.slug.clone(),
+        thread_id,
+        turn_context.sub_id.clone(),
+    );
     let SkillInjections {
         items: skill_items,
         warnings: skill_warnings,
@@ -4166,6 +4253,23 @@ pub(crate) async fn run_turn(
         &available_connectors,
         &skill_name_counts_lower,
     ));
+    let connector_names_by_id = available_connectors
+        .iter()
+        .map(|connector| (connector.id.as_str(), connector.name.as_str()))
+        .collect::<HashMap<&str, &str>>();
+    let mentioned_app_invocations = explicitly_enabled_connectors
+        .iter()
+        .map(|connector_id| AppInvocation {
+            connector_id: Some(connector_id.clone()),
+            app_name: connector_names_by_id
+                .get(connector_id.as_str())
+                .map(|name| (*name).to_string()),
+            invoke_type: Some("explicit".to_string()),
+        })
+        .collect::<Vec<_>>();
+    sess.services
+        .analytics_events_client
+        .track_app_mentioned(tracking.clone(), mentioned_app_invocations);
     sess.merge_connector_selection(explicitly_enabled_connectors.clone())
         .await;
 
@@ -4186,7 +4290,6 @@ pub(crate) async fn run_turn(
     // many turns, from the perspective of the user, it is a single turn.
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
 
-    let turn_metadata_header = turn_context.resolve_turn_metadata_header().await;
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
     let mut client_session =
@@ -4238,6 +4341,7 @@ pub(crate) async fn run_turn(
             })
             .map(|user_message| user_message.message())
             .collect::<Vec<String>>();
+        let turn_metadata_header = turn_context.current_turn_metadata_header();
         match run_sampling_request(
             Arc::clone(&sess),
             Arc::clone(&turn_context),
@@ -4262,7 +4366,7 @@ pub(crate) async fn run_turn(
                 let estimated_token_count =
                     sess.get_estimated_token_count(turn_context.as_ref()).await;
 
-                info!(
+                trace!(
                     turn_id = %turn_context.sub_id,
                     total_usage_tokens,
                     estimated_token_count = ?estimated_token_count,
@@ -4451,11 +4555,20 @@ fn collect_explicit_app_ids_from_skill_items(
 }
 
 fn filter_connectors_for_input(
-    connectors: Vec<connectors::AppInfo>,
+    connectors: &[connectors::AppInfo],
     input: &[ResponseItem],
     explicitly_enabled_connectors: &HashSet<String>,
     skill_name_counts_lower: &HashMap<String, usize>,
 ) -> Vec<connectors::AppInfo> {
+    let connectors: Vec<connectors::AppInfo> = connectors
+        .iter()
+        .filter(|connector| connector.is_enabled)
+        .cloned()
+        .collect::<Vec<_>>();
+    if connectors.is_empty() {
+        return Vec::new();
+    }
+
     let user_messages = collect_user_messages(input);
     if user_messages.is_empty() && explicitly_enabled_connectors.is_empty() {
         return Vec::new();
@@ -4518,7 +4631,7 @@ fn connector_inserted_in_messages(
 }
 
 fn filter_codex_apps_mcp_tools(
-    mut mcp_tools: HashMap<String, crate::mcp_connection_manager::ToolInfo>,
+    mcp_tools: &HashMap<String, crate::mcp_connection_manager::ToolInfo>,
     connectors: &[connectors::AppInfo],
 ) -> HashMap<String, crate::mcp_connection_manager::ToolInfo> {
     let allowed: HashSet<&str> = connectors
@@ -4526,17 +4639,19 @@ fn filter_codex_apps_mcp_tools(
         .map(|connector| connector.id.as_str())
         .collect();
 
-    mcp_tools.retain(|_, tool| {
-        if tool.server_name != CODEX_APPS_MCP_SERVER_NAME {
-            return true;
-        }
-        let Some(connector_id) = codex_apps_connector_id(tool) else {
-            return false;
-        };
-        allowed.contains(connector_id)
-    });
-
     mcp_tools
+        .iter()
+        .filter(|(_, tool)| {
+            if tool.server_name != CODEX_APPS_MCP_SERVER_NAME {
+                return true;
+            }
+            let Some(connector_id) = codex_apps_connector_id(tool) else {
+                return false;
+            };
+            allowed.contains(connector_id)
+        })
+        .map(|(name, tool)| (name.clone(), tool.clone()))
+        .collect()
 }
 
 fn codex_apps_connector_id(tool: &crate::mcp_connection_manager::ToolInfo) -> Option<&str> {
@@ -4698,38 +4813,44 @@ async fn built_tools(
     let mut effective_explicitly_enabled_connectors = explicitly_enabled_connectors.clone();
     effective_explicitly_enabled_connectors.extend(sess.get_connector_selection().await);
 
-    let connectors_for_tools = if turn_context.config.features.enabled(Feature::Apps) {
-        let skill_name_counts_lower = skills_outcome.map_or_else(HashMap::new, |outcome| {
-            build_skill_name_counts(&outcome.skills, &outcome.disabled_paths).1
-        });
-        let connectors = connectors::accessible_connectors_from_mcp_tools(&mcp_tools);
-        Some(filter_connectors_for_input(
-            connectors,
-            input,
-            &effective_explicitly_enabled_connectors,
-            &skill_name_counts_lower,
+    let connectors = if turn_context.features.enabled(Feature::Apps) {
+        Some(connectors::with_app_enabled_state(
+            connectors::accessible_connectors_from_mcp_tools(&mcp_tools),
+            &turn_context.config,
         ))
     } else {
         None
     };
 
-    if turn_context.config.features.enabled(Feature::Apps) {
+    if let Some(connectors) = connectors.as_ref() {
+        let skill_name_counts_lower = skills_outcome.map_or_else(HashMap::new, |outcome| {
+            build_skill_name_counts(&outcome.skills, &outcome.disabled_paths).1
+        });
+
+        let explicitly_enabled = filter_connectors_for_input(
+            connectors,
+            input,
+            &effective_explicitly_enabled_connectors,
+            &skill_name_counts_lower,
+        );
+
         let mut selected_mcp_tools =
             if let Some(selected_tools) = sess.get_mcp_tool_selection().await {
-                filter_mcp_tools_by_name(mcp_tools.clone(), &selected_tools)
+                filter_mcp_tools_by_name(&mcp_tools, &selected_tools)
             } else {
                 HashMap::new()
             };
 
-        if let Some(connectors) = connectors_for_tools.as_ref() {
-            let apps_mcp_tools = filter_codex_apps_mcp_tools_only(mcp_tools, connectors);
-            selected_mcp_tools.extend(apps_mcp_tools);
-        }
+        let apps_mcp_tools =
+            filter_codex_apps_mcp_tools_only(&mcp_tools, explicitly_enabled.as_ref());
+        selected_mcp_tools.extend(apps_mcp_tools);
 
         mcp_tools = selected_mcp_tools;
-    } else if let Some(connectors) = connectors_for_tools.as_ref() {
-        mcp_tools = filter_codex_apps_mcp_tools(mcp_tools, connectors);
     }
+
+    let app_tools = connectors
+        .as_ref()
+        .map(|connectors| filter_codex_apps_mcp_tools(&mcp_tools, connectors));
 
     Ok(Arc::new(ToolRouter::from_config(
         &turn_context.tools_config,
@@ -4739,6 +4860,7 @@ async fn built_tools(
                 .map(|(name, tool)| (name, tool.tool))
                 .collect(),
         ),
+        app_tools,
         turn_context.dynamic_tools.as_slice(),
     )))
 }
@@ -5163,21 +5285,8 @@ async fn try_run_sampling_request(
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
     let collaboration_mode = sess.current_collaboration_mode().await;
-    let rollout_item = RolloutItem::TurnContext(TurnContextItem {
-        turn_id: Some(turn_context.sub_id.clone()),
-        cwd: turn_context.cwd.clone(),
-        approval_policy: turn_context.approval_policy,
-        sandbox_policy: turn_context.sandbox_policy.clone(),
-        model: turn_context.model_info.slug.clone(),
-        personality: turn_context.personality,
-        collaboration_mode: Some(collaboration_mode),
-        effort: turn_context.reasoning_effort,
-        summary: turn_context.reasoning_summary,
-        user_instructions: turn_context.user_instructions.clone(),
-        developer_instructions: turn_context.developer_instructions.clone(),
-        final_output_json_schema: turn_context.final_output_json_schema.clone(),
-        truncation_policy: Some(turn_context.truncation_policy.into()),
-    });
+    let rollout_item =
+        RolloutItem::TurnContext(turn_context.to_turn_context_item(collaboration_mode));
 
     feedback_tags!(
         model = turn_context.model_info.slug.clone(),
@@ -5477,6 +5586,11 @@ mod tests {
     use crate::CodexAuth;
     use crate::config::ConfigBuilder;
     use crate::config::test_config;
+    use crate::config_loader::ConfigLayerStack;
+    use crate::config_loader::ConfigLayerStackOrdering;
+    use crate::config_loader::NetworkConstraints;
+    use crate::config_loader::RequirementSource;
+    use crate::config_loader::Sourced;
     use crate::exec::ExecToolCallOutput;
     use crate::function_tool::FunctionCallError;
     use crate::mcp_connection_manager::ToolInfo;
@@ -5507,6 +5621,7 @@ mod tests {
     use crate::tools::handlers::ShellHandler;
     use crate::tools::handlers::UnifiedExecHandler;
     use crate::tools::registry::ToolHandler;
+    use crate::tools::router::ToolCallSource;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_app_server_protocol::AppInfo;
     use codex_otel::TelemetryAuthMode;
@@ -5568,6 +5683,7 @@ mod tests {
             distribution_channel: None,
             install_url: None,
             is_accessible: true,
+            is_enabled: true,
         }
     }
 
@@ -5653,6 +5769,42 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reload_user_config_layer_updates_effective_apps_config() {
+        let (session, _turn_context) = make_session_and_context().await;
+        let codex_home = session.codex_home().await;
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        let config_toml_path = codex_home.join(CONFIG_TOML_FILE);
+        std::fs::write(
+            &config_toml_path,
+            "[apps.calendar]\nenabled = false\ndisabled_reason = \"user\"\n",
+        )
+        .expect("write user config");
+
+        session.reload_user_config_layer().await;
+
+        let config = session.get_config().await;
+        let apps_toml = config
+            .config_layer_stack
+            .effective_config()
+            .as_table()
+            .and_then(|table| table.get("apps"))
+            .cloned()
+            .expect("apps table");
+        let apps = crate::config::types::AppsConfigToml::deserialize(apps_toml)
+            .expect("deserialize apps config");
+        let app = apps
+            .apps
+            .get("calendar")
+            .expect("calendar app config exists");
+
+        assert!(!app.enabled);
+        assert_eq!(
+            app.disabled_reason,
+            Some(crate::config::types::AppDisabledReason::User)
+        );
+    }
+
     #[test]
     fn filter_connectors_for_input_skips_duplicate_slug_mentions() {
         let connectors = vec![
@@ -5664,7 +5816,7 @@ mod tests {
         let skill_name_counts_lower = HashMap::new();
 
         let selected = filter_connectors_for_input(
-            connectors,
+            &connectors,
             &input,
             &explicitly_enabled_connectors,
             &skill_name_counts_lower,
@@ -5681,10 +5833,26 @@ mod tests {
         let skill_name_counts_lower = HashMap::from([("todoist".to_string(), 1)]);
 
         let selected = filter_connectors_for_input(
-            connectors,
+            &connectors,
             &input,
             &explicitly_enabled_connectors,
             &skill_name_counts_lower,
+        );
+
+        assert_eq!(selected, Vec::new());
+    }
+
+    #[test]
+    fn filter_connectors_for_input_skips_disabled_connectors() {
+        let mut connector = make_connector("calendar", "Calendar");
+        connector.is_enabled = false;
+        let input = vec![user_message("use $calendar")];
+        let explicitly_enabled_connectors = HashSet::new();
+        let selected = filter_connectors_for_input(
+            &[connector],
+            &input,
+            &explicitly_enabled_connectors,
+            &HashMap::new(),
         );
 
         assert_eq!(selected, Vec::new());
@@ -5755,17 +5923,16 @@ mod tests {
             ),
         ]);
 
-        let mut selected_mcp_tools =
-            filter_mcp_tools_by_name(mcp_tools.clone(), &selected_tool_names);
+        let mut selected_mcp_tools = filter_mcp_tools_by_name(&mcp_tools, &selected_tool_names);
         let connectors = connectors::accessible_connectors_from_mcp_tools(&mcp_tools);
         let explicitly_enabled_connectors = HashSet::new();
         let connectors = filter_connectors_for_input(
-            connectors,
+            &connectors,
             &[user_message("run the selected tools")],
             &explicitly_enabled_connectors,
             &HashMap::new(),
         );
-        let apps_mcp_tools = filter_codex_apps_mcp_tools_only(mcp_tools, &connectors);
+        let apps_mcp_tools = filter_codex_apps_mcp_tools_only(&mcp_tools, &connectors);
         selected_mcp_tools.extend(apps_mcp_tools);
 
         let mut tool_names: Vec<String> = selected_mcp_tools.into_keys().collect();
@@ -5798,17 +5965,16 @@ mod tests {
             ),
         ]);
 
-        let mut selected_mcp_tools =
-            filter_mcp_tools_by_name(mcp_tools.clone(), &selected_tool_names);
+        let mut selected_mcp_tools = filter_mcp_tools_by_name(&mcp_tools, &selected_tool_names);
         let connectors = connectors::accessible_connectors_from_mcp_tools(&mcp_tools);
         let explicitly_enabled_connectors = HashSet::new();
         let connectors = filter_connectors_for_input(
-            connectors,
+            &connectors,
             &[user_message("use $calendar and then echo the response")],
             &explicitly_enabled_connectors,
             &HashMap::new(),
         );
-        let apps_mcp_tools = filter_codex_apps_mcp_tools_only(mcp_tools, &connectors);
+        let apps_mcp_tools = filter_codex_apps_mcp_tools_only(&mcp_tools, &connectors);
         selected_mcp_tools.extend(apps_mcp_tools);
 
         let mut tool_names: Vec<String> = selected_mcp_tools.into_keys().collect();
@@ -5897,6 +6063,7 @@ mod tests {
             cwd: turn_context.cwd.clone(),
             approval_policy: turn_context.approval_policy,
             sandbox_policy: turn_context.sandbox_policy.clone(),
+            network: None,
             model: previous_model.to_string(),
             personality: turn_context.personality,
             collaboration_mode: Some(turn_context.collaboration_mode.clone()),
@@ -6115,6 +6282,7 @@ mod tests {
             cwd: turn_context.cwd.clone(),
             approval_policy: turn_context.approval_policy,
             sandbox_policy: turn_context.sandbox_policy.clone(),
+            network: None,
             model: previous_model.to_string(),
             personality: turn_context.personality,
             collaboration_mode: Some(turn_context.collaboration_mode.clone()),
@@ -6304,8 +6472,8 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy.clone(),
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: config.permissions.approval_policy.clone(),
+            sandbox_policy: config.permissions.sandbox_policy.clone(),
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -6395,8 +6563,8 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy.clone(),
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: config.permissions.approval_policy.clone(),
+            sandbox_policy: config.permissions.sandbox_policy.clone(),
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -6705,8 +6873,8 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy.clone(),
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: config.permissions.approval_policy.clone(),
+            sandbox_policy: config.permissions.sandbox_policy.clone(),
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -6758,8 +6926,8 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy.clone(),
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: config.permissions.approval_policy.clone(),
+            sandbox_policy: config.permissions.sandbox_policy.clone(),
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -6904,8 +7072,8 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy.clone(),
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: config.permissions.approval_policy.clone(),
+            sandbox_policy: config.permissions.sandbox_policy.clone(),
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -7103,6 +7271,61 @@ mod tests {
             sess.previous_model().await,
             Some(tc.model_info.slug.clone())
         );
+    }
+
+    #[tokio::test]
+    async fn build_settings_update_items_emits_environment_item_for_network_changes() {
+        let (session, previous_context) = make_session_and_context().await;
+        let previous_context = Arc::new(previous_context);
+        let mut current_context = previous_context
+            .with_model(
+                previous_context.model_info.slug.clone(),
+                &session.services.models_manager,
+            )
+            .await;
+
+        let mut config = (*current_context.config).clone();
+        let mut requirements = config.config_layer_stack.requirements().clone();
+        requirements.network = Some(Sourced::new(
+            NetworkConstraints {
+                allowed_domains: Some(vec!["api.example.com".to_string()]),
+                denied_domains: Some(vec!["blocked.example.com".to_string()]),
+                ..Default::default()
+            },
+            RequirementSource::CloudRequirements,
+        ));
+        let layers = config
+            .config_layer_stack
+            .get_layers(ConfigLayerStackOrdering::LowestPrecedenceFirst, true)
+            .into_iter()
+            .cloned()
+            .collect();
+        config.config_layer_stack = ConfigLayerStack::new(
+            layers,
+            requirements,
+            config.config_layer_stack.requirements_toml().clone(),
+        )
+        .expect("rebuild config layer stack with network requirements");
+        current_context.config = Arc::new(config);
+
+        let update_items =
+            session.build_settings_update_items(Some(&previous_context), None, &current_context);
+
+        let environment_update = update_items
+            .iter()
+            .find_map(|item| match item {
+                ResponseItem::Message { role, content, .. } if role == "user" => {
+                    let [ContentItem::InputText { text }] = content.as_slice() else {
+                        return None;
+                    };
+                    text.contains("<environment_context>").then_some(text)
+                }
+                _ => None,
+            })
+            .expect("environment update item should be emitted");
+        assert!(environment_update.contains("<network enabled=\"true\">"));
+        assert!(environment_update.contains("<allowed>api.example.com</allowed>"));
+        assert!(environment_update.contains("<denied>blocked.example.com</denied>"));
     }
 
     #[derive(Clone, Copy)]
@@ -7415,6 +7638,7 @@ mod tests {
                 .list_all_tools()
                 .await
         };
+        let app_tools = Some(tools.clone());
         let router = ToolRouter::from_config(
             &turn_context.tools_config,
             Some(
@@ -7423,6 +7647,7 @@ mod tests {
                     .map(|(name, tool)| (name, tool.tool))
                     .collect(),
             ),
+            app_tools,
             turn_context.dynamic_tools.as_slice(),
         );
         let item = ResponseItem::CustomToolCall {
@@ -7444,6 +7669,7 @@ mod tests {
                 Arc::clone(&turn_context),
                 tracker,
                 call,
+                ToolCallSource::Direct,
             )
             .await
             .expect_err("expected fatal error");
