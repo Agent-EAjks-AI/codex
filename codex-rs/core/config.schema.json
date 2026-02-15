@@ -370,6 +370,9 @@
             "request_rule": {
               "type": "boolean"
             },
+            "request_permission": {
+              "type": "boolean"
+            },
             "responses_websockets": {
               "type": "boolean"
             },
@@ -1646,6 +1649,9 @@
           "type": "boolean"
         },
         "request_rule": {
+          "type": "boolean"
+        },
+        "request_permission": {
           "type": "boolean"
         },
         "responses_websockets": {
