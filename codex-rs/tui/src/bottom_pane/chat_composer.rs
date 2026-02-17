@@ -31,8 +31,8 @@
 //!
 //! # Submission and Prompt Expansion
 //!
-//! When steer is enabled, `Enter` submits immediately. `Tab` requests queuing while a task is
-//! running; if no task is running, `Tab` submits just like Enter so input is never dropped.
+//! `Enter` submits immediately. `Tab` requests queuing while a task is running; if no task is
+//! running, `Tab` submits just like Enter so input is never dropped.
 //! `Tab` does not submit when entering a `!` shell command.
 //!
 //! On submit/queue paths, the composer:
@@ -326,8 +326,6 @@ pub(crate) struct ChatComposer {
     dismissed_mention_popup_token: Option<String>,
     mention_bindings: HashMap<u64, ComposerMentionBinding>,
     recent_submission_mention_bindings: Vec<MentionBinding>,
-    /// When enabled, `Enter` submits immediately and `Tab` requests queuing behavior.
-    steer_enabled: bool,
     collaboration_modes_enabled: bool,
     config: ChatComposerConfig,
     collaboration_mode_indicator: Option<CollaborationModeIndicator>,
@@ -427,7 +425,6 @@ impl ChatComposer {
             dismissed_mention_popup_token: None,
             mention_bindings: HashMap::new(),
             recent_submission_mention_bindings: Vec::new(),
-            steer_enabled: false,
             collaboration_modes_enabled: false,
             config,
             collaboration_mode_indicator: None,
@@ -474,17 +471,6 @@ impl ChatComposer {
         }
         self.mention_bindings.clear();
         ordered
-    }
-
-    /// Enables or disables "Steer" behavior for submission keys.
-    ///
-    /// When steer is enabled, `Enter` produces [`InputResult::Submitted`] (send immediately) and
-    /// `Tab` produces [`InputResult::Queued`] when a task is running; otherwise it submits
-    /// immediately. `Tab` does not submit when the input is a `!` shell command.
-    /// When steer is disabled, `Enter` produces [`InputResult::Queued`], preserving the default
-    /// "queue while a task is running" behavior.
-    pub fn set_steer_enabled(&mut self, enabled: bool) {
-        self.steer_enabled = enabled;
     }
 
     pub fn set_collaboration_modes_enabled(&mut self, enabled: bool) {
@@ -2565,25 +2551,12 @@ impl ChatComposer {
                 modifiers: KeyModifiers::NONE,
                 kind: KeyEventKind::Press,
                 ..
-            } if self.steer_enabled && !self.is_bang_shell_command() => {
-                self.handle_submission(self.is_task_running)
-            }
-            KeyEvent {
-                code: KeyCode::Tab,
-                modifiers: KeyModifiers::NONE,
-                kind: KeyEventKind::Press,
-                ..
-            } if self.is_task_running && !self.is_bang_shell_command() => {
-                self.handle_submission(true)
-            }
+            } if !self.is_bang_shell_command() => self.handle_submission(self.is_task_running),
             KeyEvent {
                 code: KeyCode::Enter,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => {
-                let should_queue = !self.steer_enabled;
-                self.handle_submission(should_queue)
-            }
+            } => self.handle_submission(false),
             input => self.handle_input_basic(input),
         }
     }
@@ -2849,7 +2822,6 @@ impl ChatComposer {
             use_shift_enter_hint: self.use_shift_enter_hint,
             is_task_running: self.is_task_running,
             quit_shortcut_key: self.quit_shortcut_key,
-            steer_enabled: self.steer_enabled,
             collaboration_modes_enabled: self.collaboration_modes_enabled,
             is_wsl,
             context_window_percent: self.context_window_percent,
@@ -3489,9 +3461,7 @@ impl ChatComposer {
                     | FooterMode::ComposerHasDraft => false,
                 };
                 let show_queue_hint = match footer_props.mode {
-                    FooterMode::ComposerHasDraft => {
-                        footer_props.is_task_running && footer_props.steer_enabled
-                    }
+                    FooterMode::ComposerHasDraft => footer_props.is_task_running,
                     FooterMode::QuitShortcutReminder
                     | FooterMode::ComposerEmpty
                     | FooterMode::ShortcutOverlay
@@ -4106,10 +4076,9 @@ mod tests {
             },
         );
 
-        // Textarea has content, agent running, steer enabled: queue hint is shown.
+        // Textarea has content, agent running: queue hint is shown.
         snapshot_composer_state_with_width("footer_collapse_queue_full", 120, true, |composer| {
             setup_collab_footer(composer, 98, None);
-            composer.set_steer_enabled(true);
             composer.set_task_running(true);
             composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
         });
@@ -4119,7 +4088,6 @@ mod tests {
             true,
             |composer| {
                 setup_collab_footer(composer, 98, None);
-                composer.set_steer_enabled(true);
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4130,7 +4098,6 @@ mod tests {
             true,
             |composer| {
                 setup_collab_footer(composer, 98, None);
-                composer.set_steer_enabled(true);
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4141,7 +4108,6 @@ mod tests {
             true,
             |composer| {
                 setup_collab_footer(composer, 98, None);
-                composer.set_steer_enabled(true);
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4152,20 +4118,18 @@ mod tests {
             true,
             |composer| {
                 setup_collab_footer(composer, 98, None);
-                composer.set_steer_enabled(true);
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
         );
 
-        // Textarea has content, plan mode active, agent running, steer enabled: queue hint + mode.
+        // Textarea has content, plan mode active, agent running: queue hint + mode.
         snapshot_composer_state_with_width(
             "footer_collapse_plan_queue_full",
             120,
             true,
             |composer| {
                 setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
-                composer.set_steer_enabled(true);
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4176,7 +4140,6 @@ mod tests {
             true,
             |composer| {
                 setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
-                composer.set_steer_enabled(true);
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4187,7 +4150,6 @@ mod tests {
             true,
             |composer| {
                 setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
-                composer.set_steer_enabled(true);
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4198,7 +4160,6 @@ mod tests {
             true,
             |composer| {
                 setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
-                composer.set_steer_enabled(true);
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4209,7 +4170,6 @@ mod tests {
             true,
             |composer| {
                 setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
-                composer.set_steer_enabled(true);
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4281,11 +4241,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
 
         composer.set_text_content("draft text".to_string(), Vec::new(), Vec::new());
         assert_eq!(composer.clear_for_ctrl_c(), Some("draft text".to_string()));
@@ -4349,7 +4304,6 @@ mod tests {
         assert_eq!(composer.pending_pastes, vec![(placeholder.clone(), large)]);
         assert_eq!(composer.textarea.element_payloads(), vec![placeholder]);
 
-        composer.set_steer_enabled(true);
         let (result, _needs_redraw) =
             composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match result {
@@ -4503,13 +4457,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
 
         let (result, needs_redraw) =
             composer.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
@@ -4552,10 +4499,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
 
         // Force an active paste burst so this test doesn't depend on tight timing.
         composer
@@ -4663,10 +4606,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         assert_eq!(composer.footer_mode, FooterMode::ShortcutOverlay);
@@ -4844,10 +4783,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
         assert!(composer.is_in_paste_burst());
@@ -4879,10 +4814,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('あ'), KeyModifiers::NONE));
 
@@ -5025,9 +4956,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
 
         let mut now = Instant::now();
         let step = Duration::from_millis(1);
@@ -5043,7 +4971,7 @@ mod tests {
         );
         now += step;
 
-        let (result, _) = composer.handle_submission_with_time(!composer.steer_enabled, now);
+        let (result, _) = composer.handle_submission_with_time(false, now);
         assert!(
             matches!(result, InputResult::None),
             "Enter during a burst should insert newline, not submit"
@@ -5179,9 +5107,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
 
         let needs_redraw = composer.handle_paste("hello".to_string());
         assert!(needs_redraw);
@@ -5211,9 +5136,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
-        composer.set_steer_enabled(true);
 
         // Ensure composer is empty and press Enter.
         assert!(composer.textarea.text().is_empty());
@@ -5243,7 +5165,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 10);
         let needs_redraw = composer.handle_paste(large.clone());
@@ -5281,7 +5202,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.handle_paste(large);
         assert_eq!(composer.pending_pastes.len(), 1);
@@ -5415,7 +5335,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         // Type "/mo" humanlike so paste-burst doesn’t interfere.
         type_chars_humanlike(&mut composer, &['/', 'm', 'o']);
@@ -5444,7 +5363,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
         type_chars_humanlike(&mut composer, &['/', 'm', 'o']);
 
         match &composer.active_popup {
@@ -5476,7 +5394,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         // Type "/res" humanlike so paste-burst doesn’t interfere.
         type_chars_humanlike(&mut composer, &['/', 'r', 'e', 's']);
@@ -5794,7 +5711,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_submits_when_no_task_running_in_steer_mode() {
+    fn tab_submits_when_no_task_running() {
         use crossterm::event::KeyCode;
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
@@ -5808,7 +5725,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         type_chars_humanlike(&mut composer, &['h', 'i']);
 
@@ -5823,7 +5739,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_does_not_submit_for_bang_shell_command_in_steer_mode() {
+    fn tab_does_not_submit_for_bang_shell_command() {
         use crossterm::event::KeyCode;
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
@@ -5837,7 +5753,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
         composer.set_task_running(false);
 
         type_chars_humanlike(&mut composer, &['!', 'l', 's']);
@@ -5948,7 +5863,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         // Define test cases: (paste content, is_large)
         let test_cases = [
@@ -6229,7 +6143,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
         let path = PathBuf::from("/tmp/image1.png");
         composer.attach_image(path.clone());
         composer.handle_paste(" hi".into());
@@ -6268,7 +6181,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         let mention_bindings = vec![MentionBinding {
             mention: "figma".to_string(),
@@ -6302,7 +6214,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
         let remote_image_url = "https://example.com/remote.png".to_string();
         composer.set_remote_image_urls(vec![remote_image_url.clone()]);
         let path = PathBuf::from("/tmp/image1.png");
@@ -6369,7 +6280,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         type_chars_humanlike(&mut composer, &['f', 'i', 'r', 's', 't']);
         let (result, _needs_redraw) =
@@ -6435,7 +6345,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         let large_content = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 5);
         composer.handle_paste(large_content.clone());
@@ -6479,7 +6388,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         let large_content = format!("  {}", "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 5));
         composer.handle_paste(large_content.clone());
@@ -6523,7 +6431,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         let pasted = "line1\r\nline2\r\n".to_string();
         composer.handle_paste(pasted);
@@ -6567,7 +6474,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.textarea.set_text_clearing_elements("/unknown ");
         composer.textarea.set_cursor("/unknown ".len());
@@ -6614,7 +6520,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
         let path = PathBuf::from("/tmp/image2.png");
         composer.attach_image(path.clone());
         let (result, _) =
@@ -6926,7 +6831,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         // Inject prompts as if received via event.
         composer.set_custom_prompts(vec![CustomPrompt {
@@ -6966,7 +6870,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7002,7 +6905,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7042,7 +6944,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7098,7 +6999,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7155,7 +7055,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7204,7 +7103,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         // Create a custom prompt with positional args (no named args like $USER)
         composer.set_custom_prompts(vec![CustomPrompt {
@@ -7269,7 +7167,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7328,7 +7225,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer
             .textarea
@@ -7365,7 +7261,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer
             .textarea
@@ -7503,7 +7398,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7542,7 +7436,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7581,7 +7474,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7625,7 +7517,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7666,7 +7557,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(false);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "my-prompt".to_string(),
@@ -7681,9 +7571,10 @@ mod tests {
             .set_text_clearing_elements("/prompts:my-prompt foo ");
         composer.textarea.set_cursor(composer.textarea.text().len());
         composer.attach_image(PathBuf::from("/tmp/unused.png"));
+        composer.set_task_running(true);
 
         let (result, _needs_redraw) =
-            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            composer.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
         assert!(matches!(
             result,
@@ -7739,7 +7630,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "elegant".to_string(),
@@ -7812,7 +7702,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "price".to_string(),
@@ -7851,7 +7740,6 @@ mod tests {
             "Ask Codex to do anything".to_string(),
             false,
         );
-        composer.set_steer_enabled(true);
 
         composer.set_custom_prompts(vec![CustomPrompt {
             name: "repeat".to_string(),

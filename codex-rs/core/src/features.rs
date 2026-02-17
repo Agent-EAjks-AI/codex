@@ -132,6 +132,7 @@ pub enum Feature {
     /// Prompt for missing skill env var dependencies.
     SkillEnvVarDependencyPrompt,
     /// Steer feature flag - when enabled, Enter submits immediately instead of queuing.
+    /// Kept for config backward compatibility; behavior is always steer-enabled.
     Steer,
     /// Enable collaboration modes (Plan, Default).
     CollaborationModes,
@@ -611,7 +612,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::Steer,
         key: "steer",
-        stage: Stage::Stable,
+        stage: Stage::Removed,
         default_enabled: true,
     },
     FeatureSpec {
