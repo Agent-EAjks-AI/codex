@@ -2938,6 +2938,12 @@ impl CodexMessageProcessor {
                         thread_id,
                         err.message
                     );
+                } else {
+                    self.replay_pending_item_requests_to_connection(
+                        thread_id,
+                        request_id.connection_id,
+                    )
+                    .await;
                 }
 
                 let Some(mut thread) = self
@@ -5985,6 +5991,48 @@ impl CodexMessageProcessor {
             }
         });
     }
+
+    async fn replay_pending_item_requests_to_connection(
+        &mut self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) {
+        let thread_state = self.thread_state_manager.thread_state(thread_id);
+        let pending_item_ids =
+            ThreadState::pending_item_ids_for_connection(&thread_state, connection_id).await;
+
+        for item_id in pending_item_ids {
+            let outgoing = self.outgoing.clone();
+            ThreadState::with_pending_item_request(
+                &thread_state,
+                &item_id,
+                |pending_item_request| async move {
+                    let Some(mut pending_request) = pending_item_request else {
+                        return (None, ());
+                    };
+                    if !pending_request.needs_delivery_to(connection_id) {
+                        return (Some(pending_request), ());
+                    }
+
+                    let request_id = pending_request.request_id.clone();
+                    let sent = outgoing
+                        .send_existing_request_to_connections(
+                            &[connection_id],
+                            request_id.clone(),
+                            pending_request.payload.clone(),
+                        )
+                        .await;
+                    if sent {
+                        pending_request
+                            .mark_delivered_if_request_matches(&request_id, connection_id);
+                    }
+                    (Some(pending_request), ())
+                },
+            )
+            .await;
+        }
+    }
+
     async fn git_diff_to_origin(&self, request_id: ConnectionRequestId, cwd: PathBuf) {
         let diff = git_diff_to_remote(&cwd).await;
         match diff {
@@ -6373,6 +6421,38 @@ async fn handle_pending_thread_resume_request(
     };
     outgoing.send_response(request_id, response).await;
     thread_state.lock().await.add_connection(connection_id);
+
+    let pending_item_ids =
+        ThreadState::pending_item_ids_for_connection(thread_state, connection_id).await;
+    for item_id in pending_item_ids {
+        let outgoing = outgoing.clone();
+        ThreadState::with_pending_item_request(
+            thread_state,
+            &item_id,
+            |pending_item_request| async move {
+                let Some(mut pending_request) = pending_item_request else {
+                    return (None, ());
+                };
+                if !pending_request.needs_delivery_to(connection_id) {
+                    return (Some(pending_request), ());
+                }
+
+                let request_id = pending_request.request_id.clone();
+                let sent = outgoing
+                    .send_existing_request_to_connections(
+                        &[connection_id],
+                        request_id.clone(),
+                        pending_request.payload.clone(),
+                    )
+                    .await;
+                if sent {
+                    pending_request.mark_delivered_if_request_matches(&request_id, connection_id);
+                }
+                (Some(pending_request), ())
+            },
+        )
+        .await;
+    }
 }
 
 async fn load_thread_for_running_resume_response(

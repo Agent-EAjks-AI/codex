@@ -81,6 +81,20 @@ impl ThreadScopedOutgoingMessageSender {
             .await
     }
 
+    pub(crate) async fn send_request_with_id(
+        &self,
+        payload: ServerRequestPayload,
+    ) -> Option<(RequestId, oneshot::Receiver<ClientRequestResult>)> {
+        if self.connection_ids.is_empty() {
+            return None;
+        }
+        Some(
+            self.outgoing
+                .send_request_with_id_to_connections(self.connection_ids.as_slice(), payload)
+                .await,
+        )
+    }
+
     pub(crate) async fn send_server_notification(&self, notification: ServerNotification) {
         if self.connection_ids.is_empty() {
             return;
@@ -104,6 +118,10 @@ impl ThreadScopedOutgoingMessageSender {
         error: JSONRPCErrorError,
     ) {
         self.outgoing.send_error(request_id, error).await;
+    }
+
+    pub(crate) fn connection_ids(&self) -> &[ConnectionId] {
+        self.connection_ids.as_slice()
     }
 }
 
@@ -182,6 +200,42 @@ impl OutgoingMessageSender {
             request_id_to_callback.remove(&outgoing_message_id);
         }
         (outgoing_message_id, rx_approve)
+    }
+
+    pub(crate) async fn send_existing_request_to_connections(
+        &self,
+        connection_ids: &[ConnectionId],
+        request_id: RequestId,
+        request: ServerRequestPayload,
+    ) -> bool {
+        if connection_ids.is_empty() {
+            return false;
+        }
+
+        let should_send = {
+            let callbacks = self.request_id_to_callback.lock().await;
+            callbacks.contains_key(&request_id)
+        };
+        if !should_send {
+            return false;
+        }
+
+        let outgoing_message = OutgoingMessage::Request(request.request_with_id(request_id));
+        let mut sent_any = false;
+        for connection_id in connection_ids {
+            match self
+                .sender
+                .send(OutgoingEnvelope::ToConnection {
+                    connection_id: *connection_id,
+                    message: outgoing_message.clone(),
+                })
+                .await
+            {
+                Ok(()) => sent_any = true,
+                Err(err) => warn!("failed to send request to client: {err:?}"),
+            }
+        }
+        sent_any
     }
 
     pub(crate) async fn notify_client_response(&self, id: RequestId, result: Result) {
@@ -403,6 +457,7 @@ mod tests {
     use codex_app_server_protocol::ModelReroutedNotification;
     use codex_app_server_protocol::RateLimitSnapshot;
     use codex_app_server_protocol::RateLimitWindow;
+    use codex_app_server_protocol::ToolRequestUserInputParams;
     use codex_protocol::ThreadId;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -679,5 +734,93 @@ mod tests {
             .expect("wait should not time out")
             .expect("waiter should receive a callback");
         assert_eq!(result, Err(error));
+    }
+
+    #[tokio::test]
+    async fn send_existing_request_to_connections_replays_pending_request() {
+        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(8);
+        let outgoing = OutgoingMessageSender::new(tx);
+        let initial_payload =
+            ServerRequestPayload::ToolRequestUserInput(ToolRequestUserInputParams {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-1".to_string(),
+                questions: Vec::new(),
+            });
+
+        let (request_id, wait_for_result) = outgoing
+            .send_request_with_id_to_connections(&[ConnectionId(1)], initial_payload.clone())
+            .await;
+
+        let envelope = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("should receive first envelope")
+            .expect("first envelope should exist");
+        let first_message = match envelope {
+            OutgoingEnvelope::ToConnection {
+                connection_id,
+                message,
+            } => {
+                assert_eq!(connection_id, ConnectionId(1));
+                message
+            }
+            other => panic!("expected targeted first request, got: {other:?}"),
+        };
+        let OutgoingMessage::Request(first_request) = first_message else {
+            panic!("expected first request message");
+        };
+        assert_eq!(
+            first_request,
+            initial_payload.clone().request_with_id(request_id.clone())
+        );
+
+        let replay_sent = outgoing
+            .send_existing_request_to_connections(
+                &[ConnectionId(2)],
+                request_id.clone(),
+                initial_payload.clone(),
+            )
+            .await;
+        assert!(replay_sent);
+
+        let envelope = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("should receive replay envelope")
+            .expect("replay envelope should exist");
+        let replay_message = match envelope {
+            OutgoingEnvelope::ToConnection {
+                connection_id,
+                message,
+            } => {
+                assert_eq!(connection_id, ConnectionId(2));
+                message
+            }
+            other => panic!("expected targeted replay request, got: {other:?}"),
+        };
+        let OutgoingMessage::Request(replay_request) = replay_message else {
+            panic!("expected replay request message");
+        };
+        assert_eq!(
+            replay_request,
+            initial_payload.clone().request_with_id(request_id.clone())
+        );
+
+        outgoing
+            .notify_client_response(request_id.clone(), json!({"ok": true}))
+            .await;
+        let result = timeout(Duration::from_secs(1), wait_for_result)
+            .await
+            .expect("wait should not time out")
+            .expect("waiter should receive callback");
+        assert_eq!(result, Ok(json!({"ok": true})));
+
+        let replay_after_response = outgoing
+            .send_existing_request_to_connections(&[ConnectionId(3)], request_id, initial_payload)
+            .await;
+        assert!(!replay_after_response);
+        assert!(
+            timeout(Duration::from_millis(20), rx.recv()).await.is_err(),
+            "no replay should be sent after callback is resolved"
+        );
     }
 }

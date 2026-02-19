@@ -1,5 +1,7 @@
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
+use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnError;
@@ -9,6 +11,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::EventMsg;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -32,6 +35,44 @@ pub(crate) enum ThreadListenerCommand {
     SendThreadResumeResponse(PendingThreadResumeRequest),
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingItemRequest {
+    pub(crate) item_id: String,
+    pub(crate) request_id: RequestId,
+    pub(crate) payload: ServerRequestPayload,
+    delivered_to_connections: HashSet<ConnectionId>,
+}
+
+impl PendingItemRequest {
+    pub(crate) fn new(
+        item_id: String,
+        request_id: RequestId,
+        payload: ServerRequestPayload,
+        delivered_to_connections: &[ConnectionId],
+    ) -> Self {
+        Self {
+            item_id,
+            request_id,
+            payload,
+            delivered_to_connections: delivered_to_connections.iter().copied().collect(),
+        }
+    }
+
+    pub(crate) fn needs_delivery_to(&self, connection_id: ConnectionId) -> bool {
+        !self.delivered_to_connections.contains(&connection_id)
+    }
+
+    pub(crate) fn mark_delivered_if_request_matches(
+        &mut self,
+        request_id: &RequestId,
+        connection_id: ConnectionId,
+    ) {
+        if self.request_id == *request_id {
+            self.delivered_to_connections.insert(connection_id);
+        }
+    }
+}
+
 /// Per-conversation accumulation of the latest states e.g. error message while a turn runs.
 #[derive(Default, Clone)]
 pub(crate) struct TurnSummary {
@@ -44,6 +85,8 @@ pub(crate) struct TurnSummary {
 pub(crate) struct ThreadState {
     pub(crate) pending_interrupts: PendingInterruptQueue,
     pub(crate) pending_rollbacks: Option<ConnectionRequestId>,
+    pending_item_requests: HashMap<String, PendingItemRequest>,
+    pending_item_request_locks: HashMap<String, Arc<Mutex<()>>>,
     pub(crate) turn_summary: TurnSummary,
     pub(crate) cancel_tx: Option<oneshot::Sender<()>>,
     pub(crate) experimental_raw_events: bool,
@@ -117,6 +160,73 @@ impl ThreadState {
         if !self.current_turn_history.has_active_turn() {
             self.current_turn_history.reset();
         }
+    }
+
+    fn pending_item_requests_for_connection(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Vec<PendingItemRequest> {
+        self.pending_item_requests
+            .values()
+            .filter(|request| request.needs_delivery_to(connection_id))
+            .cloned()
+            .collect()
+    }
+
+    fn pending_item_request_lock(&mut self, item_id: &str) -> Arc<Mutex<()>> {
+        self.pending_item_request_locks
+            .entry(item_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    async fn item_request_lock(
+        thread_state: &Arc<Mutex<ThreadState>>,
+        item_id: &str,
+    ) -> Arc<Mutex<()>> {
+        let mut state = thread_state.lock().await;
+        state.pending_item_request_lock(item_id)
+    }
+
+    pub(crate) async fn with_pending_item_request<R, F, Fut>(
+        thread_state: &Arc<Mutex<ThreadState>>,
+        item_id: &str,
+        f: F,
+    ) -> R
+    where
+        F: FnOnce(Option<PendingItemRequest>) -> Fut,
+        Fut: Future<Output = (Option<PendingItemRequest>, R)>,
+    {
+        let pending_item_request_lock = Self::item_request_lock(thread_state, item_id).await;
+        let _serialization_guard = pending_item_request_lock.lock_owned().await;
+
+        let pending_item_request = {
+            let mut state = thread_state.lock().await;
+            state.pending_item_requests.remove(item_id)
+        };
+
+        let (pending_item_request, result) = f(pending_item_request).await;
+
+        let mut state = thread_state.lock().await;
+        if let Some(mut request) = pending_item_request {
+            request.item_id = item_id.to_string();
+            state
+                .pending_item_requests
+                .insert(item_id.to_string(), request);
+        }
+        result
+    }
+
+    pub(crate) async fn pending_item_ids_for_connection(
+        thread_state: &Arc<Mutex<ThreadState>>,
+        connection_id: ConnectionId,
+    ) -> Vec<String> {
+        let state = thread_state.lock().await;
+        state
+            .pending_item_requests_for_connection(connection_id)
+            .into_iter()
+            .map(|request| request.item_id)
+            .collect()
     }
 }
 
@@ -292,5 +402,85 @@ impl ThreadStateManager {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_app_server_protocol::ToolRequestUserInputParams;
+    use pretty_assertions::assert_eq;
+
+    fn pending_payload(item_id: &str) -> ServerRequestPayload {
+        ServerRequestPayload::ToolRequestUserInput(ToolRequestUserInputParams {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: item_id.to_string(),
+            questions: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn pending_item_requests_are_filtered_by_connection_delivery() {
+        let mut state = ThreadState::default();
+        let connection_a = ConnectionId(1);
+        let connection_b = ConnectionId(2);
+
+        state.pending_item_requests.insert(
+            "item-1".to_string(),
+            PendingItemRequest::new(
+                "item-1".to_string(),
+                RequestId::Integer(7),
+                pending_payload("item-1"),
+                &[connection_a],
+            ),
+        );
+
+        assert!(
+            state
+                .pending_item_requests_for_connection(connection_a)
+                .is_empty()
+        );
+
+        let pending_for_b = state.pending_item_requests_for_connection(connection_b);
+        assert_eq!(pending_for_b.len(), 1);
+        assert_eq!(pending_for_b[0].item_id, "item-1");
+        assert_eq!(pending_for_b[0].request_id, RequestId::Integer(7));
+    }
+
+    #[test]
+    fn mark_pending_item_request_delivered_requires_matching_request_id() {
+        let mut state = ThreadState::default();
+        let connection_a = ConnectionId(1);
+        let connection_b = ConnectionId(2);
+
+        state.pending_item_requests.insert(
+            "item-1".to_string(),
+            PendingItemRequest::new(
+                "item-1".to_string(),
+                RequestId::Integer(11),
+                pending_payload("item-1"),
+                &[connection_a],
+            ),
+        );
+
+        if let Some(request) = state.pending_item_requests.get_mut("item-1") {
+            request.mark_delivered_if_request_matches(&RequestId::Integer(12), connection_b);
+        }
+        assert_eq!(
+            state
+                .pending_item_requests_for_connection(connection_b)
+                .len(),
+            1
+        );
+
+        if let Some(request) = state.pending_item_requests.get_mut("item-1") {
+            request.mark_delivered_if_request_matches(&RequestId::Integer(11), connection_b);
+        }
+        assert!(
+            state
+                .pending_item_requests_for_connection(connection_b)
+                .is_empty()
+        );
     }
 }

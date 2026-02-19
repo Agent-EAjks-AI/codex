@@ -6,6 +6,7 @@ use crate::error_code::INTERNAL_ERROR_CODE;
 use crate::error_code::INVALID_REQUEST_ERROR_CODE;
 use crate::outgoing_message::ClientRequestResult;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
+use crate::thread_state::PendingItemRequest;
 use crate::thread_state::ThreadState;
 use crate::thread_state::TurnSummary;
 use crate::thread_status::ThreadWatchActiveGuard;
@@ -229,9 +230,13 @@ pub(crate) async fn apply_bespoke_event_handling(
                         reason,
                         grant_root,
                     };
-                    let rx = outgoing
-                        .send_request(ServerRequestPayload::FileChangeRequestApproval(params))
-                        .await;
+                    let rx = send_and_track_pending_item_request(
+                        item_id.clone(),
+                        ServerRequestPayload::FileChangeRequestApproval(params),
+                        &outgoing,
+                        &thread_state,
+                    )
+                    .await;
                     tokio::spawn(async move {
                         on_file_change_request_approval_response(
                             event_turn_id,
@@ -338,11 +343,13 @@ pub(crate) async fn apply_bespoke_event_handling(
                         command_actions,
                         proposed_execpolicy_amendment: proposed_execpolicy_amendment_v2,
                     };
-                    let rx = outgoing
-                        .send_request(ServerRequestPayload::CommandExecutionRequestApproval(
-                            params,
-                        ))
-                        .await;
+                    let rx = send_and_track_pending_item_request(
+                        call_id.clone(),
+                        ServerRequestPayload::CommandExecutionRequestApproval(params),
+                        &outgoing,
+                        &thread_state,
+                    )
+                    .await;
                     tokio::spawn(async move {
                         on_command_execution_request_approval_response(
                             event_turn_id,
@@ -389,17 +396,24 @@ pub(crate) async fn apply_bespoke_event_handling(
                 let params = ToolRequestUserInputParams {
                     thread_id: conversation_id.to_string(),
                     turn_id: request.turn_id,
-                    item_id: request.call_id,
+                    item_id: request.call_id.clone(),
                     questions,
                 };
-                let rx = outgoing
-                    .send_request(ServerRequestPayload::ToolRequestUserInput(params))
-                    .await;
+                let item_id = request.call_id;
+                let rx = send_and_track_pending_item_request(
+                    item_id.clone(),
+                    ServerRequestPayload::ToolRequestUserInput(params),
+                    &outgoing,
+                    &thread_state,
+                )
+                .await;
                 tokio::spawn(async move {
                     on_request_user_input_response(
                         event_turn_id,
+                        item_id,
                         rx,
                         conversation,
+                        thread_state,
                         user_input_guard,
                     )
                     .await;
@@ -477,9 +491,17 @@ pub(crate) async fn apply_bespoke_event_handling(
                 event_turn_id.clone(),
             )
             .await;
-            outgoing
-                .send_server_notification(ServerNotification::ItemCompleted(notification))
-                .await;
+            let ThreadItem::McpToolCall { id: item_id, .. } = &notification.item else {
+                unreachable!();
+            };
+            let item_id = item_id.clone();
+            ThreadState::with_pending_item_request(&thread_state, &item_id, |_| async move {
+                outgoing
+                    .send_server_notification(ServerNotification::ItemCompleted(notification))
+                    .await;
+                (None, ())
+            })
+            .await;
         }
         EventMsg::CollabAgentSpawnBegin(begin_event) => {
             let item = ThreadItem::CollabAgentToolCall {
@@ -1166,9 +1188,17 @@ pub(crate) async fn apply_bespoke_event_handling(
                 turn_id: event_turn_id.clone(),
                 item,
             };
-            outgoing
-                .send_server_notification(ServerNotification::ItemCompleted(notification))
-                .await;
+            let item_id = match &notification.item {
+                ThreadItem::CommandExecution { id, .. } => id.clone(),
+                _ => unreachable!(),
+            };
+            ThreadState::with_pending_item_request(&thread_state, &item_id, |_| async move {
+                outgoing
+                    .send_server_notification(ServerNotification::ItemCompleted(notification))
+                    .await;
+                (None, ())
+            })
+            .await;
         }
         // If this is a TurnAborted, reply to any pending interrupt requests.
         EventMsg::TurnAborted(turn_aborted_event) => {
@@ -1377,6 +1407,46 @@ async fn emit_turn_completed_with_status(
         .await;
 }
 
+fn closed_request_receiver() -> oneshot::Receiver<ClientRequestResult> {
+    let (_sender, receiver) = oneshot::channel();
+    receiver
+}
+
+async fn send_and_track_pending_item_request(
+    item_id: String,
+    payload: ServerRequestPayload,
+    outgoing: &ThreadScopedOutgoingMessageSender,
+    thread_state: &Arc<Mutex<ThreadState>>,
+) -> oneshot::Receiver<ClientRequestResult> {
+    let item_id_for_state = item_id.clone();
+    ThreadState::with_pending_item_request(
+        thread_state,
+        &item_id_for_state,
+        |pending_item_request| async move {
+            let payload_for_send = payload.clone();
+            let Some((request_id, receiver)) =
+                outgoing.send_request_with_id(payload_for_send).await
+            else {
+                return (pending_item_request, closed_request_receiver());
+            };
+            (
+                Some(PendingItemRequest::new(
+                    item_id,
+                    request_id,
+                    payload,
+                    outgoing.connection_ids(),
+                )),
+                receiver,
+            )
+        },
+    )
+    .await
+}
+
+async fn clear_pending_item_request(item_id: &str, thread_state: &Arc<Mutex<ThreadState>>) {
+    ThreadState::with_pending_item_request(thread_state, item_id, |_| async { (None, ()) }).await;
+}
+
 async fn complete_file_change_item(
     conversation_id: ThreadId,
     item_id: String,
@@ -1386,10 +1456,9 @@ async fn complete_file_change_item(
     outgoing: &ThreadScopedOutgoingMessageSender,
     thread_state: &Arc<Mutex<ThreadState>>,
 ) {
-    let mut state = thread_state.lock().await;
-    state.turn_summary.file_change_started.remove(&item_id);
-    drop(state);
-
+    let item_id_for_state = item_id.clone();
+    let item_id_for_turn_summary = item_id.clone();
+    let thread_state_for_turn_summary = Arc::clone(thread_state);
     let item = ThreadItem::FileChange {
         id: item_id,
         changes,
@@ -1400,9 +1469,20 @@ async fn complete_file_change_item(
         turn_id,
         item,
     };
-    outgoing
-        .send_server_notification(ServerNotification::ItemCompleted(notification))
-        .await;
+    ThreadState::with_pending_item_request(thread_state, &item_id_for_state, |_| async move {
+        {
+            let mut state = thread_state_for_turn_summary.lock().await;
+            state
+                .turn_summary
+                .file_change_started
+                .remove(&item_id_for_turn_summary);
+        }
+        outgoing
+            .send_server_notification(ServerNotification::ItemCompleted(notification))
+            .await;
+        (None, ())
+    })
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1416,7 +1496,9 @@ async fn complete_command_execution_item(
     command_actions: Vec<V2ParsedCommand>,
     status: CommandExecutionStatus,
     outgoing: &ThreadScopedOutgoingMessageSender,
+    thread_state: &Arc<Mutex<ThreadState>>,
 ) {
+    let item_id_for_state = item_id.clone();
     let item = ThreadItem::CommandExecution {
         id: item_id,
         command,
@@ -1433,9 +1515,13 @@ async fn complete_command_execution_item(
         turn_id,
         item,
     };
-    outgoing
-        .send_server_notification(ServerNotification::ItemCompleted(notification))
-        .await;
+    ThreadState::with_pending_item_request(thread_state, &item_id_for_state, |_| async move {
+        outgoing
+            .send_server_notification(ServerNotification::ItemCompleted(notification))
+            .await;
+        (None, ())
+    })
+    .await;
 }
 
 async fn maybe_emit_raw_response_item_completed(
@@ -1659,12 +1745,15 @@ async fn on_exec_approval_response(
 
 async fn on_request_user_input_response(
     event_turn_id: String,
+    item_id: String,
     receiver: oneshot::Receiver<ClientRequestResult>,
     conversation: Arc<CodexThread>,
+    thread_state: Arc<Mutex<ThreadState>>,
     user_input_guard: ThreadWatchActiveGuard,
 ) {
     let response = receiver.await;
     drop(user_input_guard);
+    clear_pending_item_request(&item_id, &thread_state).await;
     let value = match response {
         Ok(Ok(value)) => value,
         Ok(Err(err)) => {
@@ -1785,6 +1874,7 @@ async fn on_file_change_request_approval_response(
 ) {
     let response = receiver.await;
     drop(permission_guard);
+    clear_pending_item_request(&item_id, &thread_state).await;
     let (decision, completion_status) = match response {
         Ok(Ok(value)) => {
             let response = serde_json::from_value::<FileChangeRequestApprovalResponse>(value)
@@ -1850,6 +1940,7 @@ async fn on_command_execution_request_approval_response(
 ) {
     let response = receiver.await;
     drop(permission_guard);
+    clear_pending_item_request(&item_id, &thread_state).await;
     let (decision, completion_status) = match response {
         Ok(Ok(value)) => {
             let response = serde_json::from_value::<CommandExecutionRequestApprovalResponse>(value)
@@ -1925,6 +2016,7 @@ async fn on_command_execution_request_approval_response(
             completion_item.command_actions,
             status,
             &outgoing,
+            &thread_state,
         )
         .await;
     }
