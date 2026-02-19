@@ -1986,7 +1986,7 @@ mod tests {
             web_search_mode: Some(WebSearchMode::Cached),
             session_source: SessionSource::Cli,
         });
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
         assert_contains_tool_names(
             &tools,
             &[
@@ -2002,7 +2002,8 @@ mod tests {
     #[test]
     fn test_build_specs_agent_job_worker_tools_enabled() {
         let config = test_config();
-        let model_info = ModelsManager::construct_model_info_offline("gpt-5-codex", &config);
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
         let mut features = Features::with_defaults();
         features.enable(Feature::Collab);
         features.enable(Feature::CollaborationModes);
@@ -2117,6 +2118,7 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
+            session_source: SessionSource::Cli,
         });
         let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
         assert_contains_tool_names(&tools, &["js_repl", "js_repl_reset"]);
@@ -2215,6 +2217,7 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
+            session_source: SessionSource::Cli,
         });
         let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
 
@@ -2238,6 +2241,7 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
+            session_source: SessionSource::Cli,
         });
         let (tools, _) = build_specs(&tools_config, Some(HashMap::new()), None, &[]).build();
 
@@ -2461,6 +2465,7 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Live),
+            session_source: SessionSource::Cli,
         });
 
         assert_eq!(tools_config.shell_type, ConfigShellToolType::ShellCommand);
@@ -2668,6 +2673,7 @@ mod tests {
             model_info: &model_info,
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
+            session_source: SessionSource::Cli,
         });
 
         let (tools, _) = build_specs(
