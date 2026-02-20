@@ -202,10 +202,12 @@ client_request_definitions! {
         params: v2::ThreadArchiveParams,
         response: v2::ThreadArchiveResponse,
     },
+    #[experimental("thread/increment_elicitation")]
     ThreadIncrementElicitation => "thread/increment_elicitation" {
         params: v2::ThreadIncrementElicitationParams,
         response: v2::ThreadIncrementElicitationResponse,
     },
+    #[experimental("thread/decrement_elicitation")]
     ThreadDecrementElicitation => "thread/decrement_elicitation" {
         params: v2::ThreadDecrementElicitationParams,
         response: v2::ThreadDecrementElicitationResponse,
