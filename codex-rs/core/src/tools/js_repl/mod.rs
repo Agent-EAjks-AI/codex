@@ -1287,13 +1287,9 @@ pub(crate) fn resolve_node(config_path: Option<&Path>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codex::make_session_and_context;
     use crate::protocol::AskForApproval;
     use crate::protocol::SandboxPolicy;
     use crate::turn_diff_tracker::TurnDiffTracker;
-    use codex_protocol::models::ContentItem;
-    use codex_protocol::models::ResponseInputItem;
-    use codex_protocol::openai_models::InputModality;
     use pretty_assertions::assert_eq;
     use std::fs;
     use std::path::Path;
@@ -1573,6 +1569,12 @@ mod tests {
     }
 
     async fn can_run_js_repl_runtime_tests() -> bool {
+        // These white-box runtime tests rely on the unit-test harness and are
+        // only required on macOS. Linux uses the codex-linux-sandbox arg0
+        // dispatch path, which is exercised in integration tests instead.
+        if !cfg!(target_os = "macos") {
+            return false;
+        }
         if std::env::var_os("CODEX_SANDBOX").is_some() {
             return false;
         }
@@ -1607,53 +1609,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn js_repl_persists_top_level_bindings_and_supports_tla() -> anyhow::Result<()> {
-        if !can_run_js_repl_runtime_tests().await {
-            return Ok(());
-        }
-
-        let (session, turn) = make_session_and_context().await;
-        let session = Arc::new(session);
-        let turn = Arc::new(turn);
-        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
-        let manager = turn.js_repl.manager().await?;
-
-        let first = manager
-            .execute(
-                Arc::clone(&session),
-                Arc::clone(&turn),
-                Arc::clone(&tracker),
-                JsReplArgs {
-                    code: "let x = await Promise.resolve(41); console.log(x);".to_string(),
-                    timeout_ms: Some(10_000),
-                },
-            )
-            .await?;
-        assert!(first.output.contains("41"));
-
-        let second = manager
-            .execute(
-                Arc::clone(&session),
-                Arc::clone(&turn),
-                Arc::clone(&tracker),
-                JsReplArgs {
-                    code: "console.log(x + 1);".to_string(),
-                    timeout_ms: Some(10_000),
-                },
-            )
-            .await?;
-
-        assert!(second.output.contains("42"));
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn js_repl_timeout_does_not_deadlock() -> anyhow::Result<()> {
         if !can_run_js_repl_runtime_tests().await {
             return Ok(());
         }
 
-        let (session, turn) = make_session_and_context().await;
+        let (session, turn) = crate::codex::make_session_and_context().await;
         let session = Arc::new(session);
         let turn = Arc::new(turn);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
@@ -1688,7 +1649,7 @@ mod tests {
             return Ok(());
         }
 
-        let (session, turn) = make_session_and_context().await;
+        let (session, turn) = crate::codex::make_session_and_context().await;
         let session = Arc::new(session);
         let turn = Arc::new(turn);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
@@ -1747,7 +1708,7 @@ mod tests {
             return Ok(());
         }
 
-        let (session, turn) = make_session_and_context().await;
+        let (session, turn) = crate::codex::make_session_and_context().await;
         let session = Arc::new(session);
         let turn = Arc::new(turn);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
@@ -1794,111 +1755,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn js_repl_can_call_tools() -> anyhow::Result<()> {
-        if !can_run_js_repl_runtime_tests().await {
-            return Ok(());
-        }
-
-        let (session, mut turn) = make_session_and_context().await;
-        turn.approval_policy
-            .set(AskForApproval::Never)
-            .expect("test setup should allow updating approval policy");
-        turn.sandbox_policy
-            .set(SandboxPolicy::DangerFullAccess)
-            .expect("test setup should allow updating sandbox policy");
-
-        let session = Arc::new(session);
-        let turn = Arc::new(turn);
-        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
-        let manager = turn.js_repl.manager().await?;
-
-        let shell = manager
-            .execute(
-                Arc::clone(&session),
-                Arc::clone(&turn),
-                Arc::clone(&tracker),
-                JsReplArgs {
-                    code: "const shellOut = await codex.tool(\"shell_command\", { command: \"printf js_repl_shell_ok\" }); console.log(JSON.stringify(shellOut));".to_string(),
-                    timeout_ms: Some(15_000),
-                },
-            )
-            .await?;
-        assert!(shell.output.contains("js_repl_shell_ok"));
-
-        let tool = manager
-            .execute(
-                Arc::clone(&session),
-                Arc::clone(&turn),
-                Arc::clone(&tracker),
-                JsReplArgs {
-                    code: "const toolOut = await codex.tool(\"list_mcp_resources\", {}); console.log(toolOut.type);".to_string(),
-                    timeout_ms: Some(15_000),
-                },
-            )
-            .await?;
-        assert!(tool.output.contains("function_call_output"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn js_repl_tool_call_rejects_recursive_js_repl_invocation() -> anyhow::Result<()> {
-        if !can_run_js_repl_runtime_tests().await {
-            return Ok(());
-        }
-
-        let (session, mut turn) = make_session_and_context().await;
-        turn.approval_policy
-            .set(AskForApproval::Never)
-            .expect("test setup should allow updating approval policy");
-        turn.sandbox_policy
-            .set(SandboxPolicy::DangerFullAccess)
-            .expect("test setup should allow updating sandbox policy");
-
-        let session = Arc::new(session);
-        let turn = Arc::new(turn);
-        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
-        let manager = turn.js_repl.manager().await?;
-
-        let result = manager
-            .execute(
-                session,
-                turn,
-                tracker,
-                JsReplArgs {
-                    code: r#"
-try {
-  await codex.tool("js_repl", "console.log('recursive')");
-  console.log("unexpected-success");
-} catch (err) {
-  console.log(String(err));
-}
-"#
-                    .to_string(),
-                    timeout_ms: Some(15_000),
-                },
-            )
-            .await?;
-
-        assert!(
-            result.output.contains("js_repl cannot invoke itself"),
-            "expected recursion guard message, got output: {}",
-            result.output
-        );
-        assert!(
-            !result.output.contains("unexpected-success"),
-            "recursive js_repl tool call unexpectedly succeeded: {}",
-            result.output
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn js_repl_waits_for_unawaited_tool_calls_before_completion() -> anyhow::Result<()> {
-        if !can_run_js_repl_runtime_tests().await || cfg!(windows) {
+        if !can_run_js_repl_runtime_tests().await {
             return Ok(());
         }
 
-        let (session, mut turn) = make_session_and_context().await;
+        let (session, mut turn) = crate::codex::make_session_and_context().await;
         turn.approval_policy
             .set(AskForApproval::Never)
             .expect("test setup should allow updating approval policy");
@@ -1939,136 +1801,6 @@ console.log("cell-complete");
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn js_repl_can_attach_image_via_view_image_tool() -> anyhow::Result<()> {
-        if !can_run_js_repl_runtime_tests().await {
-            return Ok(());
-        }
-
-        let (session, mut turn) = make_session_and_context().await;
-        if !turn
-            .model_info
-            .input_modalities
-            .contains(&InputModality::Image)
-        {
-            return Ok(());
-        }
-        turn.approval_policy
-            .set(AskForApproval::Never)
-            .expect("test setup should allow updating approval policy");
-        turn.sandbox_policy
-            .set(SandboxPolicy::DangerFullAccess)
-            .expect("test setup should allow updating sandbox policy");
-
-        let session = Arc::new(session);
-        let turn = Arc::new(turn);
-        *session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
-
-        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
-        let manager = turn.js_repl.manager().await?;
-        let code = r#"
-const fs = await import("node:fs/promises");
-const path = await import("node:path");
-const imagePath = path.join(codex.tmpDir, "js-repl-view-image.png");
-const png = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
-  "base64"
-);
-await fs.writeFile(imagePath, png);
-const out = await codex.tool("view_image", { path: imagePath });
-console.log(out.type);
-console.log(out.output?.body?.text ?? "");
-"#;
-
-        let result = manager
-            .execute(
-                Arc::clone(&session),
-                turn,
-                tracker,
-                JsReplArgs {
-                    code: code.to_string(),
-                    timeout_ms: Some(15_000),
-                },
-            )
-            .await?;
-        assert!(result.output.contains("function_call_output"));
-
-        let pending_input = session.get_pending_input().await;
-        let image_url = pending_input
-            .iter()
-            .find_map(|item| match item {
-                ResponseInputItem::Message { content, .. } => {
-                    content.iter().find_map(|content_item| match content_item {
-                        ContentItem::InputImage { image_url } => Some(image_url.as_str()),
-                        _ => None,
-                    })
-                }
-                _ => None,
-            })
-            .expect("view_image should inject an input_image message for the active turn");
-        assert!(image_url.starts_with("data:image/png;base64,"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn js_repl_does_not_expose_process_global() -> anyhow::Result<()> {
-        if !can_run_js_repl_runtime_tests().await {
-            return Ok(());
-        }
-
-        let (session, turn) = make_session_and_context().await;
-        let session = Arc::new(session);
-        let turn = Arc::new(turn);
-        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
-        let manager = turn.js_repl.manager().await?;
-
-        let result = manager
-            .execute(
-                session,
-                turn,
-                tracker,
-                JsReplArgs {
-                    code: "console.log(typeof process);".to_string(),
-                    timeout_ms: Some(10_000),
-                },
-            )
-            .await?;
-        assert!(result.output.contains("undefined"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn js_repl_blocks_sensitive_builtin_imports() -> anyhow::Result<()> {
-        if !can_run_js_repl_runtime_tests().await {
-            return Ok(());
-        }
-
-        let (session, turn) = make_session_and_context().await;
-        let session = Arc::new(session);
-        let turn = Arc::new(turn);
-        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
-        let manager = turn.js_repl.manager().await?;
-
-        let err = manager
-            .execute(
-                session,
-                turn,
-                tracker,
-                JsReplArgs {
-                    code: "await import(\"node:process\");".to_string(),
-                    timeout_ms: Some(10_000),
-                },
-            )
-            .await
-            .expect_err("node:process import should be blocked");
-        assert!(
-            err.to_string()
-                .contains("Importing module \"node:process\" is not allowed in js_repl")
-        );
-        Ok(())
-    }
-
     #[tokio::test]
     async fn js_repl_prefers_env_node_module_dirs_over_config() -> anyhow::Result<()> {
         if !can_run_js_repl_runtime_tests().await {
@@ -2081,7 +1813,7 @@ console.log(out.output?.body?.text ?? "");
         let config_base = tempdir()?;
         let cwd_dir = tempdir()?;
 
-        let (session, mut turn) = make_session_and_context().await;
+        let (session, mut turn) = crate::codex::make_session_and_context().await;
         turn.shell_environment_policy.r#set.insert(
             "CODEX_JS_REPL_NODE_MODULE_DIRS".to_string(),
             env_base.path().to_string_lossy().to_string(),
@@ -2126,7 +1858,7 @@ console.log(out.output?.body?.text ?? "");
 
         let cwd_dir = tempdir()?;
 
-        let (session, mut turn) = make_session_and_context().await;
+        let (session, mut turn) = crate::codex::make_session_and_context().await;
         turn.shell_environment_policy
             .r#set
             .remove("CODEX_JS_REPL_NODE_MODULE_DIRS");
@@ -2170,7 +1902,7 @@ console.log(out.output?.body?.text ?? "");
         let cwd_dir = tempdir()?;
         write_js_repl_test_package(cwd_dir.path(), "repl_probe", "cwd")?;
 
-        let (session, mut turn) = make_session_and_context().await;
+        let (session, mut turn) = crate::codex::make_session_and_context().await;
         turn.shell_environment_policy
             .r#set
             .remove("CODEX_JS_REPL_NODE_MODULE_DIRS");
@@ -2211,7 +1943,7 @@ console.log(out.output?.body?.text ?? "");
         let cwd_dir = tempdir()?;
         write_js_repl_test_package(base_dir.path(), "repl_probe", "normalized")?;
 
-        let (session, mut turn) = make_session_and_context().await;
+        let (session, mut turn) = crate::codex::make_session_and_context().await;
         turn.shell_environment_policy
             .r#set
             .remove("CODEX_JS_REPL_NODE_MODULE_DIRS");
@@ -2248,7 +1980,7 @@ console.log(out.output?.body?.text ?? "");
             return Ok(());
         }
 
-        let (session, turn) = make_session_and_context().await;
+        let (session, turn) = crate::codex::make_session_and_context().await;
         let session = Arc::new(session);
         let turn = Arc::new(turn);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::default()));
