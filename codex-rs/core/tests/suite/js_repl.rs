@@ -12,7 +12,6 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
-use which::which;
 use wiremock::MockServer;
 
 fn custom_tool_output_text_and_success(
@@ -56,20 +55,11 @@ async fn run_js_repl_turn(
 }
 
 fn can_run_js_repl_runtime_tests() -> bool {
-    // These js_repl runtime coverage tests are required on macOS. On other
-    // platforms we skip here and rely on the integration paths that are wired
-    // for those sandbox launch flows.
-    if !cfg!(target_os = "macos") {
-        return false;
-    }
-    if let Some(path) = std::env::var_os("CODEX_JS_REPL_NODE_PATH")
-        && std::path::Path::new(&path).exists()
-    {
-        return true;
-    }
-    which("node").is_ok()
+    // Require these runtime integration tests on macOS only. Other platforms
+    // exercise js_repl via separate coverage paths and may not have equivalent
+    // sandbox/test-harness setup in this suite.
+    cfg!(target_os = "macos")
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_persists_top_level_bindings_and_supports_tla() -> Result<()> {
     skip_if_no_network!(Ok(()));
