@@ -243,6 +243,7 @@ use crate::render::renderable::RenderableItem;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
+use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod interrupts;
@@ -915,18 +916,23 @@ impl ChatWidget {
         &mut self,
         header: String,
         details: Option<String>,
-        details_capitalize: bool,
+        details_capitalization: StatusDetailsCapitalization,
         details_max_lines: usize,
     ) {
         self.current_status_header = header.clone();
         self.bottom_pane
-            .update_status(header, details, details_capitalize, details_max_lines);
+            .update_status(header, details, details_capitalization, details_max_lines);
     }
 
     /// Convenience wrapper around [`Self::set_status`];
     /// updates the status indicator header and clears any existing details.
     fn set_status_header(&mut self, header: String) {
-        self.set_status(header, None, true, STATUS_DETAILS_DEFAULT_MAX_LINES);
+        self.set_status(
+            header,
+            None,
+            StatusDetailsCapitalization::CapitalizeFirst,
+            STATUS_DETAILS_DEFAULT_MAX_LINES,
+        );
     }
 
     /// Sets the currently rendered footer status-line value.
@@ -1948,7 +1954,7 @@ impl ChatWidget {
             self.set_status(
                 "Waiting for background terminal".to_string(),
                 command_display.clone(),
-                false,
+                StatusDetailsCapitalization::Preserve,
                 1,
             );
             match &mut self.unified_exec_wait_streak {
@@ -2226,7 +2232,7 @@ impl ChatWidget {
         self.set_status(
             message,
             additional_details,
-            true,
+            StatusDetailsCapitalization::CapitalizeFirst,
             STATUS_DETAILS_DEFAULT_MAX_LINES,
         );
     }
@@ -6284,7 +6290,7 @@ impl ChatWidget {
         self.set_status(
             "Setting up sandbox...".to_string(),
             Some("Hang tight, this may take a few minutes".to_string()),
-            true,
+            StatusDetailsCapitalization::CapitalizeFirst,
             STATUS_DETAILS_DEFAULT_MAX_LINES,
         );
         self.request_redraw();
