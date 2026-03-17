@@ -2148,7 +2148,7 @@
             "null"
           ]
         },
-        "matchType": {
+        "match_type": {
           "$ref": "#/definitions/FuzzyFileSearchMatchType"
         },
         "path": {
@@ -2165,7 +2165,7 @@
       },
       "required": [
         "file_name",
-        "matchType",
+        "match_type",
         "path",
         "root",
         "score"
