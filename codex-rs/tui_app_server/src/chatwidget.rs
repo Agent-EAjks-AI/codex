@@ -5870,7 +5870,7 @@ impl ChatWidget {
                 self.on_exec_command_output_delta(ExecCommandOutputDeltaEvent {
                     call_id: notification.item_id,
                     stream: codex_protocol::protocol::ExecOutputStream::Stdout,
-                    chunk: notification.delta,
+                    chunk: notification.delta.into_bytes(),
                 });
             }
             ServerNotification::FileChangeOutputDelta(notification) => {
