@@ -44,6 +44,7 @@ use crate::skills::loader::SkillRoot;
 use crate::skills::loader::load_skills_from_roots;
 use codex_app_server_protocol::ConfigValueWriteParams;
 use codex_app_server_protocol::MergeStrategy;
+use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
@@ -421,15 +422,30 @@ impl From<RemotePluginFetchError> for PluginRemoteSyncError {
 pub struct PluginsManager {
     codex_home: PathBuf,
     store: PluginStore,
+    restriction_product: Option<Product>,
     cache_by_cwd: RwLock<HashMap<PathBuf, PluginLoadOutcome>>,
     analytics_events_client: RwLock<Option<AnalyticsEventsClient>>,
 }
 
 impl PluginsManager {
     pub fn new(codex_home: PathBuf) -> Self {
+        Self::new_with_restriction_product(codex_home, Some(Product::Codex))
+    }
+
+    pub fn new_with_restriction_product(
+        codex_home: PathBuf,
+        restriction_product: Option<Product>,
+    ) -> Self {
+        // Product restrictions are enforced at marketplace admission time for a given CODEX_HOME:
+        // listing, install, and curated refresh all consult this restriction context before new
+        // plugins enter local config or cache. After admission, runtime plugin loading trusts the
+        // contents of that CODEX_HOME and does not re-filter configured plugins by product.
+        //
+        // This assumes a single CODEX_HOME is only used by one product.
         Self {
             codex_home: codex_home.clone(),
             store: PluginStore::new(codex_home),
+            restriction_product,
             cache_by_cwd: RwLock::new(HashMap::new()),
             analytics_events_client: RwLock::new(None),
         }
@@ -441,6 +457,13 @@ impl PluginsManager {
             Err(err) => err.into_inner(),
         };
         *stored_client = Some(analytics_events_client);
+    }
+
+    fn restriction_product_matches(&self, products: &[Product]) -> bool {
+        products.is_empty()
+            || self
+                .restriction_product
+                .is_some_and(|product| product.matches_product_restriction(products))
     }
 
     pub fn plugins_for_config(&self, config: &Config) -> PluginLoadOutcome {
@@ -457,6 +480,9 @@ impl PluginsManager {
         config_layer_stack: &ConfigLayerStack,
         force_reload: bool,
     ) -> PluginLoadOutcome {
+        // Runtime plugin loading intentionally does not re-apply product restrictions to already
+        // configured plugins. We assume this manager's CODEX_HOME only contains plugins admitted
+        // for a single product via the restriction context above.
         if !plugins_feature_enabled_from_stack(config_layer_stack) {
             return PluginLoadOutcome::default();
         }
@@ -494,7 +520,11 @@ impl PluginsManager {
         &self,
         request: PluginInstallRequest,
     ) -> Result<PluginInstallOutcome, PluginInstallError> {
-        let resolved = resolve_marketplace_plugin(&request.marketplace_path, &request.plugin_name)?;
+        let resolved = resolve_marketplace_plugin(
+            &request.marketplace_path,
+            &request.plugin_name,
+            self.restriction_product,
+        )?;
         self.install_resolved_plugin(resolved).await
     }
 
@@ -504,7 +534,11 @@ impl PluginsManager {
         auth: Option<&CodexAuth>,
         request: PluginInstallRequest,
     ) -> Result<PluginInstallOutcome, PluginInstallError> {
-        let resolved = resolve_marketplace_plugin(&request.marketplace_path, &request.plugin_name)?;
+        let resolved = resolve_marketplace_plugin(
+            &request.marketplace_path,
+            &request.plugin_name,
+            self.restriction_product,
+        )?;
         let plugin_id = resolved.plugin_id.as_key();
         // This only forwards the backend mutation before the local install flow. We rely on
         // `plugin/list(forceRemoteSync=true)` to sync local state rather than doing an extra
@@ -833,6 +867,9 @@ impl PluginsManager {
                         if !seen_plugin_keys.insert(plugin_key.clone()) {
                             return None;
                         }
+                        if !self.restriction_product_matches(&plugin.policy.products) {
+                            return None;
+                        }
 
                         Some(ConfiguredMarketplacePlugin {
                             // Enabled state is keyed by `<plugin>@<marketplace>`, so duplicate
@@ -902,7 +939,10 @@ impl PluginsManager {
             path,
             scope: SkillScope::User,
         }))
-        .skills;
+        .skills
+        .into_iter()
+        .filter(|skill| skill.matches_product_restriction_for_product(self.restriction_product))
+        .collect();
         let apps = load_plugin_apps(source_path.as_path());
         let mcp_config_paths = plugin_mcp_config_paths(source_path.as_path(), manifest_paths);
         let mut mcp_server_names = Vec::new();
@@ -971,6 +1011,7 @@ impl PluginsManager {
         }
         let manager = Arc::clone(self);
         let codex_home = self.codex_home.clone();
+        let restriction_product = self.restriction_product;
         if let Err(err) = std::thread::Builder::new()
             .name("plugins-curated-repo-sync".to_string())
             .spawn(
@@ -980,6 +1021,7 @@ impl PluginsManager {
                             codex_home.as_path(),
                             &curated_plugin_version,
                             &configured_curated_plugin_ids,
+                            restriction_product,
                         ) {
                             Ok(cache_refreshed) => {
                                 if cache_refreshed {
@@ -1205,6 +1247,7 @@ fn refresh_curated_plugin_cache(
     codex_home: &Path,
     plugin_version: &str,
     configured_curated_plugin_ids: &[PluginId],
+    restriction_product: Option<Product>,
 ) -> Result<bool, String> {
     let store = PluginStore::new(codex_home.to_path_buf());
     let curated_marketplace_path = AbsolutePathBuf::try_from(
@@ -1215,9 +1258,12 @@ fn refresh_curated_plugin_cache(
         .map_err(|err| format!("failed to load curated marketplace for cache refresh: {err}"))?;
 
     let mut plugin_sources = HashMap::<String, AbsolutePathBuf>::new();
+    let mut product_restricted_plugin_names = HashSet::<String>::new();
     for plugin in curated_marketplace.plugins {
         let plugin_name = plugin.name;
-        if plugin_sources.contains_key(&plugin_name) {
+        if plugin_sources.contains_key(&plugin_name)
+            || product_restricted_plugin_names.contains(&plugin_name)
+        {
             warn!(
                 plugin = plugin_name,
                 marketplace = OPENAI_CURATED_MARKETPLACE_NAME,
@@ -1228,7 +1274,14 @@ fn refresh_curated_plugin_cache(
         let source_path = match plugin.source {
             MarketplacePluginSource::Local { path } => path,
         };
-        plugin_sources.insert(plugin_name, source_path);
+        if plugin.policy.products.is_empty()
+            || restriction_product
+                .is_some_and(|product| product.matches_product_restriction(&plugin.policy.products))
+        {
+            plugin_sources.insert(plugin_name, source_path);
+        } else {
+            product_restricted_plugin_names.insert(plugin_name);
+        }
     }
 
     let mut cache_refreshed = false;
@@ -1238,6 +1291,15 @@ fn refresh_curated_plugin_cache(
         }
 
         let Some(source_path) = plugin_sources.get(&plugin_id.plugin_name).cloned() else {
+            if product_restricted_plugin_names.contains(&plugin_id.plugin_name) {
+                info!(
+                    plugin = plugin_id.plugin_name,
+                    marketplace = OPENAI_CURATED_MARKETPLACE_NAME,
+                    restriction_product = ?restriction_product,
+                    "skipping curated plugin cache refresh for product-restricted plugin"
+                );
+                continue;
+            }
             warn!(
                 plugin = plugin_id.plugin_name,
                 marketplace = OPENAI_CURATED_MARKETPLACE_NAME,

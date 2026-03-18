@@ -5414,13 +5414,8 @@ impl CodexMessageProcessor {
             Ok::<Vec<PluginMarketplaceEntry>, MarketplaceError>(
                 marketplaces
                     .into_iter()
-                    .map(|marketplace| PluginMarketplaceEntry {
-                        name: marketplace.name,
-                        path: marketplace.path,
-                        interface: marketplace.interface.map(|interface| MarketplaceInterface {
-                            display_name: interface.display_name,
-                        }),
-                        plugins: marketplace
+                    .filter_map(|marketplace| {
+                        let plugins = marketplace
                             .plugins
                             .into_iter()
                             .map(|plugin| PluginSummary {
@@ -5433,7 +5428,18 @@ impl CodexMessageProcessor {
                                 auth_policy: plugin.policy.authentication.into(),
                                 interface: plugin.interface.map(plugin_interface_to_info),
                             })
-                            .collect(),
+                            .collect::<Vec<_>>();
+
+                        (!plugins.is_empty()).then_some(PluginMarketplaceEntry {
+                            name: marketplace.name,
+                            path: marketplace.path,
+                            interface: marketplace.interface.map(|interface| {
+                                MarketplaceInterface {
+                                    display_name: interface.display_name,
+                                }
+                            }),
+                            plugins,
+                        })
                     })
                     .collect(),
             )

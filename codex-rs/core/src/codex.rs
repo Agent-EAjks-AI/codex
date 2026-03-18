@@ -4736,15 +4736,16 @@ mod handlers {
     pub async fn list_skills(
         sess: &Session,
         sub_id: String,
-        cwds: Vec<PathBuf>,
+        mut cwds: Vec<PathBuf>,
         force_reload: bool,
     ) {
-        let cwds = if cwds.is_empty() {
+        let cwd = {
             let state = sess.state.lock().await;
-            vec![state.session_configuration.cwd.clone()]
-        } else {
-            cwds
+            state.session_configuration.cwd.clone()
         };
+        if cwds.is_empty() {
+            cwds = vec![cwd];
+        }
 
         let skills_manager = &sess.services.skills_manager;
         let mut skills = Vec::new();
