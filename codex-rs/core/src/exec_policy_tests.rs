@@ -73,6 +73,10 @@ fn unrestricted_file_system_sandbox_policy() -> FileSystemSandboxPolicy {
     FileSystemSandboxPolicy::unrestricted()
 }
 
+fn external_file_system_sandbox_policy() -> FileSystemSandboxPolicy {
+    FileSystemSandboxPolicy::external_sandbox()
+}
+
 #[tokio::test]
 async fn returns_empty_policy_when_no_policy_files_exist() {
     let temp_dir = tempdir().expect("create temp dir");
@@ -1482,6 +1486,32 @@ async fn dangerous_rm_rf_requires_approval_in_danger_full_access() {
         requirement,
         ExecApprovalRequirement::NeedsApproval {
             reason: None,
+            proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(command)),
+        }
+    );
+}
+
+#[tokio::test]
+async fn dangerous_rm_rf_is_allowed_without_approval_in_external_sandbox_when_prompts_disabled() {
+    let command = vec_str(&["rm", "-rf", "/tmp/nonexistent"]);
+    let manager = ExecPolicyManager::default();
+    let requirement = manager
+        .create_exec_approval_requirement_for_command(ExecApprovalRequest {
+            command: &command,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: &SandboxPolicy::ExternalSandbox {
+                network_access: Default::default(),
+            },
+            file_system_sandbox_policy: &external_file_system_sandbox_policy(),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            prefix_rule: None,
+        })
+        .await;
+
+    assert_eq!(
+        requirement,
+        ExecApprovalRequirement::Skip {
+            bypass_sandbox: false,
             proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(command)),
         }
     );
