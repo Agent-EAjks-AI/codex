@@ -18,6 +18,7 @@ use super::remote::enable_remote_plugin;
 use super::remote::fetch_remote_featured_plugin_ids;
 use super::remote::fetch_remote_plugin_status;
 use super::remote::uninstall_remote_plugin;
+use super::startup_sync::start_startup_remote_plugin_sync_once;
 use super::store::DEFAULT_PLUGIN_VERSION;
 use super::store::PluginId;
 use super::store::PluginIdError;
@@ -58,8 +59,8 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 use std::time::Instant;
+use tokio::sync::Mutex;
 use toml_edit::value;
 use tracing::info;
 use tracing::warn;
@@ -70,7 +71,8 @@ const DEFAULT_APP_CONFIG_FILE: &str = ".app.json";
 pub const OPENAI_CURATED_MARKETPLACE_NAME: &str = "openai-curated";
 static CURATED_REPO_SYNC_STARTED: AtomicBool = AtomicBool::new(false);
 const MAX_CAPABILITY_SUMMARY_DESCRIPTION_LEN: usize = 1024;
-const FEATURED_PLUGIN_IDS_CACHE_TTL: Duration = Duration::from_secs(60 * 60 * 3);
+const FEATURED_PLUGIN_IDS_CACHE_TTL: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60 * 3);
 
 #[derive(Clone, PartialEq, Eq)]
 struct FeaturedPluginIdsCacheKey {
@@ -462,6 +464,7 @@ pub struct PluginsManager {
     store: PluginStore,
     featured_plugin_ids_cache: RwLock<Option<CachedFeaturedPluginIds>>,
     cached_enabled_outcome: RwLock<Option<PluginLoadOutcome>>,
+    remote_sync_lock: Mutex<()>,
     restriction_product: Option<Product>,
     analytics_events_client: RwLock<Option<AnalyticsEventsClient>>,
 }
@@ -487,6 +490,7 @@ impl PluginsManager {
             store: PluginStore::new(codex_home),
             featured_plugin_ids_cache: RwLock::new(None),
             cached_enabled_outcome: RwLock::new(None),
+            remote_sync_lock: Mutex::new(()),
             restriction_product,
             analytics_events_client: RwLock::new(None),
         }
@@ -774,7 +778,10 @@ impl PluginsManager {
         &self,
         config: &Config,
         auth: Option<&CodexAuth>,
+        additive_only: bool,
     ) -> Result<RemotePluginSyncResult, PluginRemoteSyncError> {
+        let _remote_sync_guard = self.remote_sync_lock.lock().await;
+
         if !config.features.enabled(Feature::Plugins) {
             return Ok(RemotePluginSyncResult::default());
         }
@@ -913,7 +920,7 @@ impl PluginsManager {
                         value: value(true),
                     });
                 }
-            } else {
+            } else if !additive_only {
                 if is_installed {
                     uninstalls.push(plugin_id);
                 }
@@ -1110,7 +1117,7 @@ impl PluginsManager {
         })
     }
 
-    pub fn maybe_start_curated_repo_sync_for_config(
+    pub fn maybe_start_plugin_startup_tasks_for_config(
         self: &Arc<Self>,
         config: &Config,
         auth_manager: Arc<AuthManager>,
@@ -1138,6 +1145,12 @@ impl PluginsManager {
                     .collect::<Vec<_>>();
             configured_curated_plugin_ids.sort_unstable_by_key(super::store::PluginId::as_key);
             self.start_curated_repo_sync(configured_curated_plugin_ids);
+            start_startup_remote_plugin_sync_once(
+                Arc::clone(self),
+                self.codex_home.clone(),
+                config.clone(),
+                auth_manager.clone(),
+            );
 
             let config = config.clone();
             let manager = Arc::clone(self);
