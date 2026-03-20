@@ -1801,6 +1801,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-code-mode"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "v8",
+]
+
+[[package]]
 name = "codex-config"
 version = "0.0.0"
 dependencies = [
@@ -1857,6 +1872,7 @@ dependencies = [
  "codex-arg0",
  "codex-artifacts",
  "codex-async-utils",
+ "codex-code-mode",
  "codex-config",
  "codex-connectors",
  "codex-exec-server",
@@ -2917,14 +2933,6 @@ version = "0.0.0"
 dependencies = [
  "pretty_assertions",
  "regex-lite",
-]
-
-[[package]]
-name = "codex-v8-poc"
-version = "0.0.0"
-dependencies = [
- "pretty_assertions",
- "v8",
 ]
 
 [[package]]
